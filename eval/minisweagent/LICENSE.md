@@ -1,7 +1,6 @@
 MIT License
 
-Copyright (c) 2026 nanoswe contributors
-Copyright (c) 2025 Andrej Karpathy (nanochat, from which this is derived)
+Copyright (c) 2025 Kilian A. Lieret and Carlos E. Jimenez
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

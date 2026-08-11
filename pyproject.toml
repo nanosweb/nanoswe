@@ -1,71 +1,29 @@
+# Dependency manifest for the nanoswe training code. This is NOT an installable
+# package: clone the repo and run from its root (record.sh, which calls
+# `torchrun -m scripts.base_train`). `uv sync` provisions the dependency env only.
 [project]
-name = "nanochat"
+name = "nanoswe"
 version = "0.1.0"
-description = "the minimal full-stack ChatGPT clone"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "datasets>=4.0.0",
-    "fastapi>=0.117.1",
-    "kernels>=0.11.7",
-    "psutil>=7.1.0",
-    "rustbpe>=0.1.0",
-    "tiktoken>=0.11.0",
-    "tokenizers>=0.22.0",
+    "kernels>=0.11.7",     # FA4 kernel fetch (flash_attention.py)
+    "psutil>=7.1.0",       # memory stats (report.py)
+    "pyarrow>=17.0.0",     # parquet reads (dataloader / dataset)
+    "requests>=2.31.0",    # shard download (dataset.py)
+    "rustbpe>=0.1.0",      # tokenizer training
+    "tiktoken>=0.11.0",    # tokenizer inference
     "torch==2.9.1",
-    "uvicorn>=0.36.0",
-    "wandb>=0.21.3",
+    "wandb>=0.21.3",       # run logging (optional; WANDB_MODE=disabled to skip)
 ]
 
-[dependency-groups]
-dev = [
-    "ipykernel>=7.1.0",
-    "matplotlib>=3.10.8",
-    "pytest>=8.0.0",
-    "python-dotenv>=1.2.1",
-    "transformers>=4.57.3",
-]
+[tool.uv]
+package = false            # deps-only: do NOT build/install this repo as a package
 
-[tool.pytest.ini_options]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-
-# target torch to cuda 12.8 or CPU
+# torch from the CUDA 12.8 wheel index (H100/B200 training)
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu128", extra = "gpu" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+torch = [{ index = "pytorch-cu128" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
-
-[project.optional-dependencies]
-cpu = [
-    "setuptools>=65.0.0",
-    "torch==2.9.1",
-]
-gpu = [
-    "torch==2.9.1",
-]
-
-[tool.uv]
-default-groups = []
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "gpu" },
-    ],
-]

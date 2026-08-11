@@ -1,0 +1,187 @@
+agent:
+  # The ONLY supported agent config. Targets models trained on
+  # data_processing/strip_redundant.py output (i.e. base_data_*_stripped/
+  # dirs) where msg[0] (system) and the <pr_description>/<instructions>
+  # wrappers have been removed.
+  #
+  # POLICY: train + eval on stripped, ALWAYS. The dataloader will refuse to
+  # train on un-stripped data; previous non-stripped agent configs have been
+  # deleted to remove any chance of pairing them with stripped models.
+  #
+  # An empty system_template causes default.py to skip the system message
+  # entirely (see default.py:run — patched 2026-05-15). Empty string instead
+  # of removing the key keeps schema compatibility with the loader.
+  system_template: ""
+  # Instance template is just the raw task (no <pr_description>, no
+  # "Consider the following PR description:" lead-in, no <instructions>).
+  # Matches what strip_redundant.py produces for msg[1].
+  instance_template: |
+    {{task}}
+  # Observation format: standard <returncode>/<output> envelope. The
+  # stripper only touches msg[0] and msg[1]; observation envelopes in
+  # mid-trajectory user turns are byte-identical to what the model trained on.
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  # 2026-05-27: cap at 100 turns. Empirically, trajectories longer than ~100
+  # turns rarely recover — they spend tokens looping rather than progressing.
+  # Set to 0 to disable the cap (legacy behavior).
+  step_limit: 100
+  cost_limit: 0.
+
+environment:
+  cwd: "/testbed"
+  # Adopt the swesmith-gen pattern (2026-05-28): tight per-step cap to free
+  # workers stuck on pathological pytest, with separate longer caps for
+  # phases that genuinely need them.
+  #   timeout         — per-bash-step exec cap (agent exploration).   60s.
+  #   startup_timeout — env_startup_command only (.git scrub on big repos
+  #                     like django ~30k files: ~50-180s).             300s.
+  #   submit_timeout  — agent's final `git add -A && git diff --cached`.
+  #                     Big-repo django diffs can exceed 60s; correctness
+  #                     requires the full diff (truncated diff = ungradable).
+  #                                                                    300s.
+  # The KV slot doesn't actually block for the full submit_timeout — when
+  # mini-swe-agent detects the submit command it calls TokenScheduler's
+  # early_release() so the KV budget is freed immediately, letting another
+  # paused worker take the slot. So 300s submit is "safe" for both
+  # correctness AND throughput.
+  timeout: 60
+  startup_timeout: 300
+  submit_timeout: 300
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  # Use SingularityEnvironment + locally-staged .sif images (see
+  # swe_agents_job.sh pre-staging step). No registry pulls.
+  environment_class: singularity
+  image_sif_dir: /tmp/singularity_images
+
+# str_replace install: stripped training data uses sed/cat-heredoc almost
+# exclusively, but the tool is installed for free so models that emit it
+# still work.
+run:
+  env_startup_command: |
+    set -e
+    base64 -d > /usr/local/bin/str_replace <<'STR_REPLACE_B64_EOF'
+    IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJzdHJfcmVwbGFjZTogZXhhY3QtbWF0Y2ggc2VhcmNo
+    L3JlcGxhY2UgdXNpbmcgZ2l0LXN0eWxlIGNvbmZsaWN0IG1hcmtlcnMuCgpVc2FnZTogc3RyX3Jl
+    cGxhY2UgUEFUSCA8IHBhdGNoX29uX3N0ZGluCgpQYXRjaCBmb3JtYXQgKG9uZSBvciBtb3JlIGJs
+    b2NrcywgaW4gb3JkZXIpOgoKICAgIDw8PDw8PDw8PCBTRUFSQ0gKICAgIC4uLmV4YWN0IGV4aXN0
+    aW5nIHRleHQuLi4KICAgID09PT09PT09PQogICAgLi4ucmVwbGFjZW1lbnQgdGV4dC4uLgogICAg
+    Pj4+Pj4+Pj4+IFJFUExBQ0UKCkVhY2ggU0VBUkNIIGJsb2NrIG11c3Qgb2NjdXIgZXhhY3RseSBv
+    bmNlIGluIHRoZSBmaWxlIGF0IHRoZSB0aW1lIGl0IGlzIGFwcGxpZWQuCiIiIgppbXBvcnQgcmUK
+    aW1wb3J0IHN5cwoKIyBNYXJrZXIgY291bnRzIGFyZSBkZWxpYmVyYXRlbHkgRkxFWElCTEUgb24g
+    dGhlIGFuZ2xlLWJyYWNrZXQgcnVucy4gVGhlCiMgdHJhaW5pbmcgdG9rZW5pemVyIGhhcyBubyAi
+    PDw8IiB0b2tlbiAob25seSAiPDwiKSwgc28gYSA5LWxvbmcgIjwiIHJ1biBpcwojIGVtaXR0ZWQg
+    YXMgZm91ciAiPDwiICsgb25lIGxvbmUgIjwiIGFuZCB0aGUgbW9kZWwgcm91dGluZWx5IGRyb3Bz
+    IHRoZSBsb25lCiMgb25lICgtPiA4ICI8Iik7ICI+IiBoYXMgYSAiPj4+IiB0b2tlbiBzbyBpdCB0
+    aWxlcyBjbGVhbmx5LiBBY2NlcHRpbmcgPj01IG9mCiMgZWl0aGVyIGJyYWNrZXQgcmVjb3ZlcnMg
+    dGhvc2UgZWRpdHMuIFRoZSAiPSIgc2VwYXJhdG9yIHN0YXlzIGV4YWN0IGF0IDkgdG8KIyBhdm9p
+    ZCBmYWxzZS1tYXRjaGluZyAiPT09PT0iIGRpdmlkZXIgbGluZXMgaW5zaWRlIFNFQVJDSC9SRVBM
+    QUNFIGNvbnRlbnQuCkJMT0NLX1JFID0gcmUuY29tcGlsZSgKICAgIHIiPHs1LH0gP1NFQVJDSFxu
+    KC4qPylcbj09PT09PT09PVxuKC4qPylcbj57NSx9ID9SRVBMQUNFIiwKICAgIHJlLkRPVEFMTCwK
+    KQoKCmRlZiBtYWluKCkgLT4gTm9uZToKICAgIGlmIGxlbihzeXMuYXJndikgIT0gMjoKICAgICAg
+    ICBzeXMuZXhpdCgidXNhZ2U6IHN0cl9yZXBsYWNlIFBBVEggPCBwYXRjaCIpCiAgICBwYXRoID0g
+    c3lzLmFyZ3ZbMV0KICAgIGJsb2NrcyA9IEJMT0NLX1JFLmZpbmRhbGwoc3lzLnN0ZGluLnJlYWQo
+    KSkKICAgIGlmIG5vdCBibG9ja3M6CiAgICAgICAgc3lzLmV4aXQoImVycm9yOiBubyBTRUFSQ0gv
+    UkVQTEFDRSBibG9jayBmb3VuZCBvbiBzdGRpbiIpCgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6
+    CiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCgogICAgZm9yIGksIChvbGQsIG5ldykgaW4gZW51
+    bWVyYXRlKGJsb2NrcywgMSk6CiAgICAgICAgbiA9IGNvbnRlbnQuY291bnQob2xkKQogICAgICAg
+    IGlmIG4gPT0gMDoKICAgICAgICAgICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFS
+    Q0ggdGV4dCBub3QgZm91bmQgaW4ge3BhdGh9IikKICAgICAgICBpZiBuID4gMToKICAgICAgICAg
+    ICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFSQ0ggdGV4dCBtYXRjaGVzIHtufSBs
+    b2NhdGlvbnMgaW4ge3BhdGh9OyBtdXN0IGJlIHVuaXF1ZSIpCiAgICAgICAgY29udGVudCA9IGNv
+    bnRlbnQucmVwbGFjZShvbGQsIG5ldywgMSkKCiAgICB3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBm
+    OgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYicmVwbGFjZWQge2xlbihibG9j
+    a3MpfSBibG9jayhzKSBpbiB7cGF0aH0iKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAg
+    ICBtYWluKCkK
+    STR_REPLACE_B64_EOF
+    chmod +x /usr/local/bin/str_replace
+    command -v python3 >/dev/null || ln -sf "$(command -v python)" /usr/local/bin/python3
+    str_replace --help 2>/dev/null || true
+    echo "[startup] str_replace installed at /usr/local/bin/str_replace"
+    # Scrub /testbed git history past base_commit. The container ships with the
+    # full upstream history (including the fix commit) — `git log` would let the
+    # agent locate the fix and `git checkout <fix> -- .` would dump the gold
+    # patch into the working tree, producing a passing `git diff --cached` with
+    # zero actual problem-solving. We sever discovery by dropping ALL refs
+    # (branches/tags/remotes) + the reflog and re-pointing HEAD at base, so
+    # `git log`/branch/tag/reflog reveal nothing past base_commit. This does
+    # NO working-tree re-hash (the old `rm -rf .git; git add -A` re-hashed every
+    # file → ~10s on django, timing out at startup_timeout under colocated
+    # concurrency → trajectories died at step 0 with no patch); this ref-drop is
+    # ~0.15s. `git status`, `git diff`, `git diff --cached`, `git checkout -- <file>`,
+    # `git show HEAD:<file>`, and the canonical submission command all still work.
+    # (The fix objects remain unreachable-but-present; primary cheat defense is
+    # the training-side filter in data_processing/strip_redundant.py.)
+    if [ -d /testbed/.git ]; then
+        (
+            set -e
+            cd /testbed
+            BASE=$(git rev-parse HEAD)
+            git for-each-ref --format='delete %(refname)' refs | git update-ref --stdin
+            git update-ref refs/heads/base "$BASE"
+            git symbolic-ref HEAD refs/heads/base
+            git reflog expire --all --expire=now
+        )
+        echo "[startup] /testbed/.git history severed at base (refs+reflog dropped, no rehash)"
+        # Baseline-commit the image's OWN uncommitted setup edits so submissions
+        # contain only agent work. sweb.eval images ship harness-applied,
+        # UNCOMMITTED worktree edits (sphinx: tox.ini gains `-rA` via upstream
+        # pre_install; astropy: a pyproject.toml pin). Without this commit,
+        # `git add -A && git diff --cached` sweeps those hunks into every
+        # submission; at grade time the fresh container already has them, git
+        # apply fails on the preimage, and the `patch --batch` fallback detects
+        # "previously applied" and applies the hunk IN REVERSE — for sphinx that
+        # strips -rA, pytest prints no per-test result lines, the log parser
+        # finds nothing, and every sphinx traj grades unresolved (measured: 0
+        # solves in 14,030 release trajs; gold patches DO resolve). Tracked
+        # files only (-a); ~no-op on clean images; cheap (index intact, no
+        # rehash). See eval/FINDINGS_sphinx_grading_bug.md.
+        if ! git -C /testbed diff --quiet HEAD 2>/dev/null; then
+            git -C /testbed -c user.email=eval@nanoswe -c user.name=nanoswe-eval \
+                commit -aqm "harness baseline (image setup edits, pre-agent)"
+            echo "[startup] baseline-committed image setup edits (submissions = agent-only diffs)"
+        fi
+    fi
