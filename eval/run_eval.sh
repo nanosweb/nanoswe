@@ -35,6 +35,7 @@ EXPORT_DIR="$(_abs "$EXPORT_DIR")"; OUT_DIR="$(_abs "$OUT_DIR")"; AGENT_CFG="$(_
 INSTANCE_IDS="$(_abs "${INSTANCE_IDS:-}")"; [ -n "${NANOSWE_TEST_SPEC_CACHE:-}" ] && export NANOSWE_TEST_SPEC_CACHE="$(_abs "$NANOSWE_TEST_SPEC_CACHE")"
 cd "$REPO_DIR"   # cwd is on sys.path for `python -`/`-m`: never let another checkout's nanoswe/ or minisweagent/ shadow this one
 mkdir -p "$OUT_DIR"
+export NO_PROXY="*" no_proxy="*"                 # the localhost endpoint (health check + agent) must bypass any HTTP proxy
 
 # 1) serve in the background (its own vLLM env), wait until the endpoint is live.
 SERVED_NAME="nanoswe-$(basename "$OUT_DIR")"
@@ -69,7 +70,6 @@ export PYTHONPATH="$EVAL_DIR:${PYTHONPATH:-}"   # shadow any installed mini-swe-
 export MSWEA_ROBUST_SUBMIT=1                     # part of the protocol: re-stage + re-diff when the submit captured nothing
 export MSWEA_SILENT_STARTUP=1 MSWEA_ALLOW_REGISTRY_PULL="${MSWEA_ALLOW_REGISTRY_PULL:-1}"
 export GRADE_KERNEL_OVERLAY=0                    # never the kernel-overlay grade path (see README)
-export NO_PROXY="*" no_proxy="*"                 # the localhost endpoint must bypass any HTTP proxy
 NSAMP=(); [ "$K" -ge 2 ] && NSAMP=(--num-samples "$K")
 IIDS=(); [ -n "${INSTANCE_IDS:-}" ] && IIDS=(--instance-ids "@$INSTANCE_IDS")
 python -m minisweagent.run.benchmarks.swebench \
