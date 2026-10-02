@@ -30,6 +30,10 @@ REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 EVAL_DIR="$REPO_DIR/eval"
 AGENT_VENV="${AGENT_VENV:-/home/rolmedo/mini-swe-agent-v2-eval/.venv}"   # jinja2/datasets/swebench/httpx/litellm/pydantic/rich/typer...
 AGENT_CFG="${AGENT_CFG:-$EVAL_DIR/configs/toolcall_agent.yaml}"
+_abs() { case "$1" in /*|"") printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # resolve user paths before the cd below
+EXPORT_DIR="$(_abs "$EXPORT_DIR")"; OUT_DIR="$(_abs "$OUT_DIR")"; AGENT_CFG="$(_abs "$AGENT_CFG")"
+INSTANCE_IDS="$(_abs "${INSTANCE_IDS:-}")"; [ -n "${NANOSWE_TEST_SPEC_CACHE:-}" ] && export NANOSWE_TEST_SPEC_CACHE="$(_abs "$NANOSWE_TEST_SPEC_CACHE")"
+cd "$REPO_DIR"   # cwd is on sys.path for `python -`/`-m`: never let another checkout's nanoswe/ or minisweagent/ shadow this one
 mkdir -p "$OUT_DIR"
 
 # 1) serve in the background (its own vLLM env), wait until the endpoint is live.

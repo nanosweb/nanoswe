@@ -16,6 +16,9 @@ EXPORT_DIR="${1:?usage: serve.sh <vllm_export_dir> [PORT]}"
 PORT="${2:-8000}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 VLLM_VENV="${VLLM_VENV:-/lustre/home/rolmedo/vllm0201}"
+_abs() { case "$1" in /*|"") printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # resolve user paths before the cd below
+EXPORT_DIR="$(_abs "$EXPORT_DIR")"
+cd "$REPO_DIR"   # cwd is on sys.path for `python -`/`-m`: never let another checkout's nanoswe/ or minisweagent/ shadow this one
 
 [ -f "$EXPORT_DIR/config.json" ] || { echo "ERROR: $EXPORT_DIR/config.json missing (run scripts/convert_to_vllm.py first)"; exit 1; }
 source "$VLLM_VENV/bin/activate"
