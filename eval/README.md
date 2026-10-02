@@ -3,78 +3,56 @@
 Self-contained harness to take a trained nanoswe checkpoint to a SWE-bench
 Verified **pass@1** number: **export → serve → agent rollouts → grade → score**.
 
-The agent is a **vendored** subset of [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)
-(MIT — see `minisweagent/LICENSE.md`), so the agent loop + grader live in-repo.
-It's vendored as *an* agent, not wired in as the only one — `run_eval.sh` calls it
-behind `mini-extra swebench`; a different agent is a drop-in replacement.
+The agent is a **vendored** copy of [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)
+v2 (MIT — see `minisweagent/LICENSE.md`) with nanoswe's additions (tool-call action parser,
+inline grader, offline test specs, singularity sandboxes), byte-identical to the harness the
+current record was evaluated with.
 
 ## What's here
 ```
-serve.sh                 vllm serve <export>  (OpenAI endpoint; registers the arch via the plugin below)
+serve.sh                 vllm serve <export>  (registers this repo's model via the plugin below)
 run_eval.sh              portable single-node driver: serve → rollouts (inline-graded) → aggregate
-run_v483.sh              cluster (HTCondor) runner: serve + sharded rollouts + inline grade + aggregate
-submit_full483.py        HTCondor submitter — all 483, K=3, sharded (drives run_v483.sh)
-submit_subset91_parity.py  HTCondor submitter — subset91, K=10, sharded
-vllm_nanoswe_plugin/     tiny vLLM plugin so `vllm serve` finds NanoChatForCausalLM without pip-installing the repo
-minisweagent/            vendored mini-swe-agent subset (agent loop, vLLM client, docker+singularity envs, swebench runner + inline grader)
-configs/stripped_agent.yaml   the prompt/tool config that defines pass@1 behavior
-ids/v091_ids.json, v483_ids.json   the canonical instance sets (subset91 + v483); ids/*_shards/ pre-split for the submitters
+vllm_nanoswe_plugin/     tiny vLLM plugin so `vllm serve` finds NanoChatForCausalLM = nanoswe/modeling_nanoswe.py
+minisweagent/            vendored mini-swe-agent v2 (agent loop, vLLM client + tool-call parser, docker/singularity envs, swebench runner + inline grader)
+configs/toolcall_agent.yaml   THE record protocol: tool-call agent (bash + file_editor), 120 s timeout, 100 steps
+configs/bash_agent.yaml       the ```bash protocol, for models trained on bash trajectories (e.g. nanoswe-192h-260812)
+ids/v483_ids.json, v091_ids.json   the 483 instances the records are scored on, and the old cheap subset91
 cache_test_specs.py      one-time builder of the offline test_spec cache (no network at grade time)
-aggregate_pass_at_k.py   run dir → pass_at_k.json (per-sample resolved rate = pass@1)
+aggregate_pass_at_k.py   run dir → pass_at_k.json (per_sample_resolved_rate = pass@1)
+cluster/                 the exact HTCondor runner + shard lists the record evals were produced with (internal paths)
 ```
 
-> **Internal-cluster runners, kept for reproducibility.** `run_v483.sh`,
-> `submit_full483.py`, and `submit_subset91_parity.py` are specific to the internal
-> HTCondor cluster the record evals were produced on (hardcoded repo/venv/cache paths,
-> node blacklists, condor knobs). They are included so the record numbers are
-> reproducible/auditable as-run, not as a portable entry point — outside this cluster,
-> use `run_eval.sh` (with `serve.sh`), which is the same serve → rollout → grade →
-> aggregate pipeline on a single node. The portable scripts default `VLLM_VENV` /
-> `AGENT_VENV` to internal paths too — override them for your environment.
+## The record protocol
 
-## External dependencies (NOT vendored)
-- **vLLM** (for serving) + the model: `nanoswe/modeling_nanoswe.py` is the vLLM-side
-  model and **must mirror `nanoswe/gpt.py`** — run `scripts/test_vllm_equivalence.py`
-  after any architecture change. Register it for serving once per vLLM env:
-  `pip install -e eval/vllm_nanoswe_plugin` (keeps the main repo non-package).
-- **`swebench`** harness + **`datasets`** + the agent deps (jinja2, httpx, rich, tenacity,
-  typer, pyyaml, python-dotenv, platformdirs). The model client is a lean in-repo
-  httpx wrapper (`models/vllm_model.py`) — **no litellm**.
-- A **container runtime** — apptainer/singularity **or** docker — plus the per-instance
-  images, and a **SWE-bench Verified dataset**, selected by `SUBSET`. The canonical,
-  public choice is `verified` (`princeton-nlp/SWE-Bench_Verified`, all 500 instances,
-  official `swebench/sweb.eval.*` images from Docker Hub). The `verified_cluster*`
-  subsets (`ricdomolm/SWE-bench_Verified-Cluster483` etc.) are **internal-cluster
-  mirrors** — their image names point at our org's registry and won't resolve outside.
+| setting | value |
+|---|---|
+| instances | the 483 SWE-bench Verified instances in `ids/v483_ids.json` (17 of the 500 do not run in our sandboxes; both records are scored on these 483) |
+| samples | **K=5 independent trajectories per instance**; pass@1 = resolved / (5 × 483) |
+| sampling | temperature **0.7**, `max_tokens` **8,192** per assistant turn, no stop strings |
+| agent | `configs/toolcall_agent.yaml`: no system message, the problem statement `{{task \| trim}}`, one JSON tool call per turn between `<\|python_start\|>` / `<\|python_end\|>` (tools `bash`, `file_editor`), `skip_special_tokens: false`, **120 s** command timeout, **100** steps, at most 3 consecutive format errors, `MSWEA_ROBUST_SUBMIT=1` |
+| serving | vLLM 0.20.1, `--max-model-len 34816`, this repo's `nanoswe/modeling_nanoswe.py` (below), default compilation / CUDA graphs / prefix caching |
+| grading | inline, apptainer overlay of the instance image, offline test specs (`NANOSWE_TEST_SPEC_CACHE`) |
 
-## Grading runtime (apptainer-overlay; docker fallback)
-`minisweagent/run/extra/grading.py` uses `swebench` only for spec-build + report-parse;
-the eval script runs in an **apptainer-overlay** container (or docker as fallback).
-Grading is offline via the test_spec cache (`NANOSWE_TEST_SPEC_CACHE`).
+The configs are the protocol: copy them verbatim. Do not add stop strings, change the
+sampling, or edit the observation / format-error templates if you want comparable numbers —
+`configs/toolcall_agent.yaml` reproduces, byte for byte, the observations the teacher saw when
+the training trajectories were generated (checked on 550k observations).
 
-> ⚠️ Do **not** set `GRADE_KERNEL_OVERLAY=1`. The kernel-overlay *grade* path errors
-> (RuntimeError/OSError, mount+fd exhaustion) on ~75% of grades at eval concurrency,
-> silently counting them unresolved → artifactual ~0% pass@1 (measured: patches that
-> grade to 3.73% on apptainer read 0.5% under it). It is unrelated to the kernel-overlay
-> *rollout* path (`environment_class: singularity-kernel`), which is fine and fast.
+### Serving matters: use this repo's model file
+`nanoswe/modeling_nanoswe.py` contains two repairs that change pass@1 materially:
+- **sliding windows** — the model trains with `window_pattern="SSSL"` (3 of every 4 layers attend
+  to the last 8,192 tokens at 32k context). Earlier serving code built every layer as full
+  attention, a train/serve mismatch on every turn past 8k tokens of context;
+- **compiled decode** — the previous-token "smear" state was dropped from the compiled decode
+  graph, and prefix-sharing requests could read each other's state.
+
+`serve.sh` loads only this repo's plugin (`VLLM_PLUGINS=nanoswe`) and refuses to start if the
+registered model lacks the window repair. Effect on the record models (same weights, same
+harness, 483 × 5): `sv3_d40_r7p4` (nanoswe-192h-261002) 11.93% → 15.65%; the bash-format
+`nanoswe-192h-260812` 11.01% → 11.76%.
 
 ## How to run an evaluation
-
-End-to-end is **export → serve → agent rollouts → grade → aggregate**. Run from the
-repo root. `pass@1` = per-sample resolved rate (`per_sample_resolved_rate` in the output).
-
-### Rulers / protocols
-| ruler | `SUBSET` (dataset) | ids restriction | K |
-|---|---|---|---|
-| **verified** — record submissions | `verified` (canonical, all 500) | — | **5** |
-| **v483** — internal headline eval | `verified_cluster_483` (483 mirror) | — | 3 |
-| **subset91** — cheap iteration | `verified_cluster_483` | `INSTANCE_IDS=eval/ids/v091_ids.json` | 10 |
-
-> **Record submissions** use the canonical `verified` set with **K=5** (5 independent
-> samples per problem, per the [rules](https://www.nanoswe.com/rules.html)). The
-> `verified_cluster*` rulers only work on our internal cluster (see above). Sampling is
-> temperature 0.7 / max_tokens 2048, pinned in the runners — don't change it if you want
-> comparable numbers.
+Run from the repo root.
 
 ### 0. One-time setup
 ```bash
@@ -85,10 +63,14 @@ python -m scripts.convert_to_vllm \
     --tokenizer $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl \
     --out /path/to/export/<run>
 
-# (b) Register THIS repo's NanoChatForCausalLM with your vLLM env (once per env):
+# (b) Register THIS repo's NanoChatForCausalLM with your vLLM 0.20.1 env (once per env):
 pip install -e eval/vllm_nanoswe_plugin
 
-# (c) Build the offline grading cache for the eval set (one-time; needs network for
+# (c) Agent env: python>=3.10 with pyyaml requests jinja2 "pydantic>=2" litellm tenacity rich
+#     python-dotenv typer platformdirs datasets swebench httpx (eval/minisweagent is put on
+#     PYTHONPATH by run_eval.sh; nothing to install from it).
+
+# (d) Build the offline grading cache for the eval set (one-time; needs network for
 #     a few repos' requirements.txt, then grading is fully offline):
 python eval/cache_test_specs.py --all \
     --dataset princeton-nlp/SWE-Bench_Verified \
@@ -96,33 +78,47 @@ python eval/cache_test_specs.py --all \
 export NANOSWE_TEST_SPEC_CACHE=/path/to/test_spec_cache.json
 ```
 
-### 1. Single node — `run_eval.sh` (portable driver)
-Serves, runs K rollouts/instance (inline-graded), aggregates → `<out>/pass_at_k.json`.
+### 1. Single node — `run_eval.sh`
+Serves, runs K rollouts per instance (inline-graded), aggregates → `<out>/pass_at_k.json`.
 ```bash
-# record submission — canonical SWE-bench Verified, all 500, K=5:
-eval/run_eval.sh /path/to/export/<run>  /path/to/out  verified  5  48
-
-# subset91 — cheap iteration, K=10:
-INSTANCE_IDS=eval/ids/v091_ids.json \
-  eval/run_eval.sh /path/to/export/<run>  /path/to/out  verified  10  48
+# the record protocol on the record's 483 instances, K=5, docker sandboxes (official images):
+INSTANCE_IDS=eval/ids/v483_ids.json AGENT_VENV=/path/to/agent-venv VLLM_VENV=/path/to/vllm-venv \
+  eval/run_eval.sh /path/to/export/<run>  /path/to/out  verified  5  12
 
 cat /path/to/out/pass_at_k.json    # per_sample_resolved_rate = pass@1, plus pass@k + counts
 ```
+Workers: the KV cache, not the GPU's compute, limits concurrency. On one H100 we use 12
+concurrent agents for depth ≤ 32 and 8 for depth 40-42; more thrashes the prefix cache.
 
-### 2. Our HTCondor cluster — sharded submitters
-`run_v483.sh` (the condor executable) shards the set across GPU slots, inline-grades,
-and aggregates per shard. The submitters set EXPORT/TAG/K/shard-count at the top:
-```bash
-python eval/submit_full483.py          # all 483, K=3, 5 shards
-python eval/submit_subset91_parity.py  # subset91, K=10, 3 shards
-```
-Pool the per-shard `pass_at_k.json`s (or re-aggregate over the inline grades) for the
-final number.
+A bash-format model (trained on ```bash trajectories, e.g. `nanoswe-192h-260812`) is evaluated
+with `AGENT_CFG=eval/configs/bash_agent.yaml EVAL_MAX_TOKENS=2048` (its 60 s timeout and
+templates are in the config).
 
-### Which code actually runs
-The agent loop + grader + aggregator are always **this repo's** vendored code
-(`PYTHONPATH=eval/` shadows any installed mini-swe-agent). For the **model** to be this
-repo's `nanoswe/modeling_nanoswe.py`, the serve env must have `eval/vllm_nanoswe_plugin`
-installed (step 0b) — `serve.sh`/`run_eval.sh` ensure this via `PYTHONPATH=$REPO_DIR`.
-(The cluster `run_v483.sh` reuses a prebuilt, behaviorally-identical plugin in the
-`vllm0201` venv instead.)
+### 2. Our HTCondor cluster — `cluster/` (as run, not portable)
+`cluster/run.sh` + `cluster/run_v483.sh` are the exact wrapper and runner the record evals used
+(fresh random port + endpoint identity check, weights sha256 preflight, sandbox eviction,
+singularity-kernel rollouts, per-shard completion audit `cluster/check_shard.py`);
+`cluster/full483_toolcall.sub` is the Condor submit file (10 shards × 8 workers, 1 H100 each)
+with the shard lists in `cluster/ids/`. They hardcode internal paths and extract the serving
+code from the internal repo's commit `9d952fe` (the same code as `nanoswe/modeling_nanoswe.py`
+here, sha256 `4a467b7c…` of the file then named `modeling_nanochat.py`). Kept for auditing.
+
+A job leaving the queue is not proof of a complete shard: check `check_shard.py`'s
+`completion_audit.json` (every instance × sample present, graded, no unsalvaged
+infrastructure traceback, no `overlay_failed`) before aggregating.
+
+## Grading runtime (apptainer-overlay; docker fallback)
+`minisweagent/run/benchmarks/grading.py` uses `swebench` only for spec-build + report-parse;
+the eval script runs in an **apptainer-overlay** container (or docker as fallback). Grading is
+offline via the test_spec cache (`NANOSWE_TEST_SPEC_CACHE`).
+
+> ⚠️ Do **not** set `GRADE_KERNEL_OVERLAY=1`. The kernel-overlay *grade* path errors
+> (RuntimeError/OSError, mount+fd exhaustion) on ~75% of grades at eval concurrency,
+> silently counting them unresolved → artifactual ~0% pass@1. It is unrelated to the
+> kernel-overlay *rollout* path (`environment_class: singularity-kernel`), which is fine.
+
+Known grading caveats (apply to every model equally): 4 instances need network at test time
+(pylint-4661, sphinx-10435, sphinx-7985, matplotlib-20488) and cannot resolve offline. The
+agent config's startup step commits the image's own uncommitted setup edits before the agent
+starts, so submissions are agent-only diffs (without it every sphinx submission graded as
+unresolved).

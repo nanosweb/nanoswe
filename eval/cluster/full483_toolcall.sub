@@ -1,0 +1,33 @@
+# ladder192 toolcall: frozen campaign commit c9111041600a20a05dc0b8c71f43dcec222dadaa + fix 9d952fe; submit FROM THE REPOSITORY ROOT: condor_submit_bid 61 <this file>
+universe = vanilla
+getenv = false
+executable = /lustre/home/rolmedo/nanoswe-final/eval/releases/ladder192_20260930/eval/compile_rerun/run.sh
+initialdir = /lustre/home/rolmedo/nanoswe-final
+OUT = /fast/rolmedo/nanoswe/swe_eval/ladder192_20260930/full483_$(TAG)_k5_8k/shard$(SHARD)
+environment = "HOME=/lustre/home/rolmedo PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin TAG=$(TAG) SHARD=$(SHARD) SHARDS=$(SHARDS) WORKERS=$(WORKERS) OUT_DIR=$(OUT) K=5 STEP_LIMIT=100 SUBSET=verified_cluster_483 EVAL_MAX_TOKENS=8192 EVAL_TEMPERATURE=0.7 NANOSWE_TEST_SPEC_CACHE=/fast/rolmedo/nanoswe/test_spec_cache_483.json"
+output = $(OUT)/condor.out
+error = $(OUT)/condor.err
+log = $(OUT)/condor.log
+request_gpus = 1
+request_cpus = 24
+request_memory = 200GB
+request_disk = 304GB
+requirements = (TARGET.CUDACapability == 9.0) && (TARGET.UtsnameNodename != "i307") && (TARGET.UtsnameNodename != "i206") && (TARGET.UtsnameNodename != "g105") && (TARGET.UtsnameNodename != "g174") && (TARGET.UtsnameNodename != "i105") && (TARGET.UtsnameNodename != "i107") && (TARGET.UtsnameNodename != "g203") && (TARGET.UtsnameNodename != "g191") && (TARGET.UtsnameNodename != "i205") && (TARGET.UtsnameNodename != "i203") && (TARGET.UtsnameNodename != "i207") && (TARGET.UtsnameNodename != "i106") && (TARGET.UtsnameNodename != "i204") && (TARGET.UtsnameNodename != "g126") && (TARGET.UtsnameNodename != "g134")
++BypassLXCfs = true
++Campaign = "ladder192_20260930_toolcall"
++CampaignCommit = "c9111041600a20a05dc0b8c71f43dcec222dadaa"
++ModelTag = "$(TAG)"
+on_exit_hold = (ExitCode =!= 0)
+should_transfer_files = NO
+queue TAG, SHARD, SHARDS, WORKERS from (
+sv3_d40_r7p4, 0, 10, 8
+sv3_d40_r7p4, 1, 10, 8
+sv3_d40_r7p4, 2, 10, 8
+sv3_d40_r7p4, 3, 10, 8
+sv3_d40_r7p4, 4, 10, 8
+sv3_d40_r7p4, 5, 10, 8
+sv3_d40_r7p4, 6, 10, 8
+sv3_d40_r7p4, 7, 10, 8
+sv3_d40_r7p4, 8, 10, 8
+sv3_d40_r7p4, 9, 10, 8
+)

@@ -960,3 +960,29 @@ class TokenScheduler:
                 "waiters_new": len(self.new_waiters),
                 "uptime_s": time.time() - self.start_t,
             }
+
+
+# ----------------------------------------------------------------------------
+# Per-endpoint limiter registry (shared by every model class in this process)
+# ----------------------------------------------------------------------------
+_LIMITERS: dict[str, "TokenScheduler"] = {}
+_LIMITERS_LOCK = threading.Lock()
+
+
+def get_limiter(api_base: str | None, model_name: str, token_scheduler: dict | None) -> "TokenScheduler | None":
+    """One TokenScheduler per vLLM endpoint (api_base) per process, regardless of how many model
+    instances point at it. Returns None when no `token_scheduler` block is configured and no
+    scheduler exists for this endpoint yet. Callers wrap a trajectory in `with limiter.acquire():`
+    and call `before_query()` / `after_query()` around each LLM request."""
+    if not api_base:
+        return None
+    with _LIMITERS_LOCK:
+        if api_base in _LIMITERS:
+            return _LIMITERS[api_base]
+        if token_scheduler is None:
+            return None
+        kw = dict(token_scheduler)
+        kw.setdefault("model_name", model_name)
+        limiter = TokenScheduler(endpoint_url=api_base, **kw)
+        _LIMITERS[api_base] = limiter
+        return limiter

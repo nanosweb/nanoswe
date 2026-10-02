@@ -9,9 +9,12 @@ _ENVIRONMENT_MAPPING = {
     "docker": "minisweagent.environments.docker.DockerEnvironment",
     "singularity": "minisweagent.environments.singularity.SingularityEnvironment",
     "singularity-localimage": "minisweagent.environments.singularity.SingularityLocalImageEnvironment",
-    "singularity-persistent": "minisweagent.environments.singularity.SingularityPersistentEnvironment",
     "singularity-kernel": "minisweagent.environments.singularity.KernelOverlayEnvironment",
+    "local": "minisweagent.environments.local.LocalEnvironment",
+    "swerex_docker": "minisweagent.environments.extra.swerex_docker.SwerexDockerEnvironment",
+    "swerex_modal": "minisweagent.environments.extra.swerex_modal.SwerexModalEnvironment",
     "bubblewrap": "minisweagent.environments.extra.bubblewrap.BubblewrapEnvironment",
+    "contree": "minisweagent.environments.extra.contree.ContreeEnvironment",
 }
 
 

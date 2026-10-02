@@ -1,0 +1,129 @@
+# v2-schema config generated from /home/rolmedo/mini-swe-agent/localconfig_no_model-qwen3-stripped.yaml by docs/cluster/convert_v1_config.py; edit the source and re-run.
+agent:
+  system_template: ''
+  instance_template: |
+    {{task}}
+  step_limit: 0
+  cost_limit: 0.0
+  max_consecutive_format_errors: 0
+  submit_salvage_command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+environment:
+  cwd: /testbed
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: docker
+model:
+  observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  action_regex: |-
+    ```bash
+    (.*?)
+    ```
+run:
+  env_startup_command: |
+    set -euo pipefail
+    # --- str_replace helper (verbatim from nanoswe-final stripped_agent.yaml).
+    # swe-zero trajectories edit via `str_replace path <<'PATCH'` heredocs in
+    # 100% of rollouts; without this the trained edit action is a no-op.
+    base64 -d > /usr/local/bin/str_replace <<'STR_REPLACE_B64_EOF'
+    IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJzdHJfcmVwbGFjZTogZXhhY3QtbWF0Y2ggc2VhcmNo
+    L3JlcGxhY2UgdXNpbmcgZ2l0LXN0eWxlIGNvbmZsaWN0IG1hcmtlcnMuCgpVc2FnZTogc3RyX3Jl
+    cGxhY2UgUEFUSCA8IHBhdGNoX29uX3N0ZGluCgpQYXRjaCBmb3JtYXQgKG9uZSBvciBtb3JlIGJs
+    b2NrcywgaW4gb3JkZXIpOgoKICAgIDw8PDw8PDw8PCBTRUFSQ0gKICAgIC4uLmV4YWN0IGV4aXN0
+    aW5nIHRleHQuLi4KICAgID09PT09PT09PQogICAgLi4ucmVwbGFjZW1lbnQgdGV4dC4uLgogICAg
+    Pj4+Pj4+Pj4+IFJFUExBQ0UKCkVhY2ggU0VBUkNIIGJsb2NrIG11c3Qgb2NjdXIgZXhhY3RseSBv
+    bmNlIGluIHRoZSBmaWxlIGF0IHRoZSB0aW1lIGl0IGlzIGFwcGxpZWQuCiIiIgppbXBvcnQgcmUK
+    aW1wb3J0IHN5cwoKIyBNYXJrZXIgY291bnRzIGFyZSBkZWxpYmVyYXRlbHkgRkxFWElCTEUgb24g
+    dGhlIGFuZ2xlLWJyYWNrZXQgcnVucy4gVGhlCiMgdHJhaW5pbmcgdG9rZW5pemVyIGhhcyBubyAi
+    PDw8IiB0b2tlbiAob25seSAiPDwiKSwgc28gYSA5LWxvbmcgIjwiIHJ1biBpcwojIGVtaXR0ZWQg
+    YXMgZm91ciAiPDwiICsgb25lIGxvbmUgIjwiIGFuZCB0aGUgbW9kZWwgcm91dGluZWx5IGRyb3Bz
+    IHRoZSBsb25lCiMgb25lICgtPiA4ICI8Iik7ICI+IiBoYXMgYSAiPj4+IiB0b2tlbiBzbyBpdCB0
+    aWxlcyBjbGVhbmx5LiBBY2NlcHRpbmcgPj01IG9mCiMgZWl0aGVyIGJyYWNrZXQgcmVjb3ZlcnMg
+    dGhvc2UgZWRpdHMuIFRoZSAiPSIgc2VwYXJhdG9yIHN0YXlzIGV4YWN0IGF0IDkgdG8KIyBhdm9p
+    ZCBmYWxzZS1tYXRjaGluZyAiPT09PT0iIGRpdmlkZXIgbGluZXMgaW5zaWRlIFNFQVJDSC9SRVBM
+    QUNFIGNvbnRlbnQuCkJMT0NLX1JFID0gcmUuY29tcGlsZSgKICAgIHIiPHs1LH0gP1NFQVJDSFxu
+    KC4qPylcbj09PT09PT09PVxuKC4qPylcbj57NSx9ID9SRVBMQUNFIiwKICAgIHJlLkRPVEFMTCwK
+    KQoKCmRlZiBtYWluKCkgLT4gTm9uZToKICAgIGlmIGxlbihzeXMuYXJndikgIT0gMjoKICAgICAg
+    ICBzeXMuZXhpdCgidXNhZ2U6IHN0cl9yZXBsYWNlIFBBVEggPCBwYXRjaCIpCiAgICBwYXRoID0g
+    c3lzLmFyZ3ZbMV0KICAgIGJsb2NrcyA9IEJMT0NLX1JFLmZpbmRhbGwoc3lzLnN0ZGluLnJlYWQo
+    KSkKICAgIGlmIG5vdCBibG9ja3M6CiAgICAgICAgc3lzLmV4aXQoImVycm9yOiBubyBTRUFSQ0gv
+    UkVQTEFDRSBibG9jayBmb3VuZCBvbiBzdGRpbiIpCgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6
+    CiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCgogICAgZm9yIGksIChvbGQsIG5ldykgaW4gZW51
+    bWVyYXRlKGJsb2NrcywgMSk6CiAgICAgICAgbiA9IGNvbnRlbnQuY291bnQob2xkKQogICAgICAg
+    IGlmIG4gPT0gMDoKICAgICAgICAgICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFS
+    Q0ggdGV4dCBub3QgZm91bmQgaW4ge3BhdGh9IikKICAgICAgICBpZiBuID4gMToKICAgICAgICAg
+    ICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFSQ0ggdGV4dCBtYXRjaGVzIHtufSBs
+    b2NhdGlvbnMgaW4ge3BhdGh9OyBtdXN0IGJlIHVuaXF1ZSIpCiAgICAgICAgY29udGVudCA9IGNv
+    bnRlbnQucmVwbGFjZShvbGQsIG5ldywgMSkKCiAgICB3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBm
+    OgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYicmVwbGFjZWQge2xlbihibG9j
+    a3MpfSBibG9jayhzKSBpbiB7cGF0aH0iKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAg
+    ICBtYWluKCkK
+    STR_REPLACE_B64_EOF
+    chmod +x /usr/local/bin/str_replace
+    command -v python3 >/dev/null || ln -sf "$(command -v python)" /usr/local/bin/python3
+    str_replace --help 2>/dev/null || true
+    echo "[startup] str_replace installed at /usr/local/bin/str_replace"
+    # Mitigation A — git-history scrub. SWE-bench Verified containers ship
+    # /testbed/.git with FULL upstream history past base_commit, including the
+    # fix commit for the very issue being evaluated. Production failure mode:
+    # agent runs `git log` -> finds the fix commit -> `git checkout <fix_sha>
+    # -- .` -> submit. `git diff --cached` then emits the gold patch with no
+    # problem-solving.
+    #
+    # Re-init .git as a single-commit repo at the current (bug-commit) working
+    # tree. Submission flow (`git add -A && git diff --cached`) and surface
+    # ops (`git status`, `git checkout -- <file>`, `git show HEAD:<file>`)
+    # still work. Cheat ops (`git log`, `git show <hash>`, `git blame`,
+    # `git checkout <hash>`) are dead. Grading is unaffected because the
+    # SWE-bench grader applies diff text to a fresh container.
+    if [ -d /testbed/.git ]; then
+      cd /testbed
+      rm -rf .git
+      git init -q
+      git -c user.email=eval@local -c user.name=eval add -A
+      git -c user.email=eval@local -c user.name=eval commit -qm "base" --allow-empty
+    fi
+  salvage_command: git add -A && git diff --cached

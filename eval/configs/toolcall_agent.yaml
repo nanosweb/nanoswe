@@ -1,0 +1,133 @@
+# Tool-call variant of verified_stripped_nanoswe.yaml, for nanoswe models trained on the
+# Lightning SWE-smith tool-call corpora produced by
+# nanoswe-final/scripts/lightning/convert_lightning_toolcall.py (base_data_lightning_toolcall_stripped,
+# base_data_smith_v3_merged, ...). The agent/environment/run sections are those of the stripped
+# config; `model` switches the action path to nanoswe_toolcall (bash + file_editor).
+#
+# TRAIN/EVAL PARITY (verified byte-for-byte by nanoswe-final/eval/toolcall_parity_check.py against
+# the training parquet, the SWE-bench Verified statements and the teacher campaign config, 2026-09-15):
+#   * no system message; first user turn == problem_statement.strip()  -> `{{task | trim}}`
+#     (every SWE-bench Verified statement has trailing whitespace; the converter strips the task)
+#   * observation_template == the teacher's (mini-swe-agent v2 swebench.yaml) template, including
+#     the <exception>...</exception> prefix and the 10k-char elision
+#   * timeout_template renders exactly what the teacher's harness produced on a timeout:
+#     <exception>Command timed out after 120 seconds</exception> / returncode -1 / the output
+#     (the v2 harness has no separate timeout template; this client does, so it is spelled out)
+#   * environment.timeout 120 s and step_limit 100 == the teacher campaign's mini-config.yaml
+#     (KEEP `timeout` and the number in timeout_template in sync)
+#   * file_editor runs the same file_editor_runtime.py the teacher ran (identical output strings)
+# NOT matched on purpose: temperature 0.7 (nanoswe eval convention; teacher sampled T=1.0/top_p 0.95)
+# and max_tokens (EVAL_MAX_TOKENS: 8192 covers 99.99% of training turns; teacher allowed 32768).
+# Format-error turns never occur in training (the converter truncates a trajectory there), so
+# format_error_template / max_consecutive_format_errors are eval-only recovery.
+# HISTORY: before 2026-09-15 this file had instance_template '{{task}}\n' (untrimmed statement plus a
+# newline), timeout 60 and the v1 "The last command ... timed out and has been killed" message; the
+# d16/d20/d24_lightning k=5 runs (release_full483_d*_lightning_k5*) were evaluated with that version.
+#
+# No `stop` strings are needed: eos_token is <|assistant_end|>, so generation ends at end-of-turn
+# with the full <|python_start|>...<|python_end|> in the content; model_kwargs.skip_special_tokens
+# MUST stay a top-level model_kwargs key (vLLM would otherwise strip the delimiters and every turn
+# would be a format error -- see eval/toolcall_smoke.sub).
+agent:
+  system_template: ''
+  instance_template: '{{task | trim}}'
+  step_limit: 100
+  cost_limit: 0.0
+  max_consecutive_format_errors: 3
+  submit_salvage_command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+environment:
+  cwd: /testbed
+  timeout: 120
+  startup_timeout: 300
+  submit_timeout: 300
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: singularity
+  image_sif_dir: /fast/rolmedo/swesmith/singularity_images/
+model:
+  observation_template: |-
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  timeout_template: |-
+    <exception>Command timed out after 120 seconds</exception>
+    <returncode>-1</returncode>
+    {% if output | length < 10000 -%}
+    <output>
+    {{ output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output | length - 10000 -%}
+    <output_head>
+    {{ output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |-
+    {{error}}
+
+    Every response must contain EXACTLY ONE tool call, written as a JSON object between
+    <|python_start|> and <|python_end|>:
+
+    <|python_start|>{"name": "bash", "arguments": {"command": "ls -la /testbed"}}<|python_end|>
+
+    Available tools: bash({"command": ...}) and
+    file_editor({"command": "view"|"create"|"str_replace"|"insert"|"undo_edit", "path": "/abs/path", ...}).
+
+    If you have completed your assignment, run exactly:
+    <|python_start|>{"name": "bash", "arguments": {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}}<|python_end|>
+  action_regex: <\|python_start\|>(.*?)<\|python_end\|>
+  action_format: nanoswe_toolcall
+  allowed_tools:
+  - bash
+  - file_editor
+  model_kwargs:
+    skip_special_tokens: false
+run:
+  env_startup_command: "set -e\nbase64 -d > /usr/local/bin/str_replace <<'STR_REPLACE_B64_EOF'\nIyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiJzdHJfcmVwbGFjZTogZXhhY3QtbWF0Y2ggc2VhcmNo\nL3JlcGxhY2UgdXNpbmcgZ2l0LXN0eWxlIGNvbmZsaWN0IG1hcmtlcnMuCgpVc2FnZTogc3RyX3Jl\ncGxhY2UgUEFUSCA8IHBhdGNoX29uX3N0ZGluCgpQYXRjaCBmb3JtYXQgKG9uZSBvciBtb3JlIGJs\nb2NrcywgaW4gb3JkZXIpOgoKICAgIDw8PDw8PDw8PCBTRUFSQ0gKICAgIC4uLmV4YWN0IGV4aXN0\naW5nIHRleHQuLi4KICAgID09PT09PT09PQogICAgLi4ucmVwbGFjZW1lbnQgdGV4dC4uLgogICAg\nPj4+Pj4+Pj4+IFJFUExBQ0UKCkVhY2ggU0VBUkNIIGJsb2NrIG11c3Qgb2NjdXIgZXhhY3RseSBv\nbmNlIGluIHRoZSBmaWxlIGF0IHRoZSB0aW1lIGl0IGlzIGFwcGxpZWQuCiIiIgppbXBvcnQgcmUK\naW1wb3J0IHN5cwoKIyBNYXJrZXIgY291bnRzIGFyZSBkZWxpYmVyYXRlbHkgRkxFWElCTEUgb24g\ndGhlIGFuZ2xlLWJyYWNrZXQgcnVucy4gVGhlCiMgdHJhaW5pbmcgdG9rZW5pemVyIGhhcyBubyAi\nPDw8IiB0b2tlbiAob25seSAiPDwiKSwgc28gYSA5LWxvbmcgIjwiIHJ1biBpcwojIGVtaXR0ZWQg\nYXMgZm91ciAiPDwiICsgb25lIGxvbmUgIjwiIGFuZCB0aGUgbW9kZWwgcm91dGluZWx5IGRyb3Bz\nIHRoZSBsb25lCiMgb25lICgtPiA4ICI8Iik7ICI+IiBoYXMgYSAiPj4+IiB0b2tlbiBzbyBpdCB0\n\
+    aWxlcyBjbGVhbmx5LiBBY2NlcHRpbmcgPj01IG9mCiMgZWl0aGVyIGJyYWNrZXQgcmVjb3ZlcnMg\ndGhvc2UgZWRpdHMuIFRoZSAiPSIgc2VwYXJhdG9yIHN0YXlzIGV4YWN0IGF0IDkgdG8KIyBhdm9p\nZCBmYWxzZS1tYXRjaGluZyAiPT09PT0iIGRpdmlkZXIgbGluZXMgaW5zaWRlIFNFQVJDSC9SRVBM\nQUNFIGNvbnRlbnQuCkJMT0NLX1JFID0gcmUuY29tcGlsZSgKICAgIHIiPHs1LH0gP1NFQVJDSFxu\nKC4qPylcbj09PT09PT09PVxuKC4qPylcbj57NSx9ID9SRVBMQUNFIiwKICAgIHJlLkRPVEFMTCwK\nKQoKCmRlZiBtYWluKCkgLT4gTm9uZToKICAgIGlmIGxlbihzeXMuYXJndikgIT0gMjoKICAgICAg\nICBzeXMuZXhpdCgidXNhZ2U6IHN0cl9yZXBsYWNlIFBBVEggPCBwYXRjaCIpCiAgICBwYXRoID0g\nc3lzLmFyZ3ZbMV0KICAgIGJsb2NrcyA9IEJMT0NLX1JFLmZpbmRhbGwoc3lzLnN0ZGluLnJlYWQo\nKSkKICAgIGlmIG5vdCBibG9ja3M6CiAgICAgICAgc3lzLmV4aXQoImVycm9yOiBubyBTRUFSQ0gv\nUkVQTEFDRSBibG9jayBmb3VuZCBvbiBzdGRpbiIpCgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6\nCiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCgogICAgZm9yIGksIChvbGQsIG5ldykgaW4gZW51\nbWVyYXRlKGJsb2NrcywgMSk6CiAgICAgICAgbiA9IGNvbnRlbnQuY291bnQob2xkKQogICAgICAg\nIGlmIG4gPT0gMDoKICAgICAgICAgICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFS\n\
+    Q0ggdGV4dCBub3QgZm91bmQgaW4ge3BhdGh9IikKICAgICAgICBpZiBuID4gMToKICAgICAgICAg\nICAgc3lzLmV4aXQoZiJlcnJvcjogYmxvY2sge2l9OiBTRUFSQ0ggdGV4dCBtYXRjaGVzIHtufSBs\nb2NhdGlvbnMgaW4ge3BhdGh9OyBtdXN0IGJlIHVuaXF1ZSIpCiAgICAgICAgY29udGVudCA9IGNv\nbnRlbnQucmVwbGFjZShvbGQsIG5ldywgMSkKCiAgICB3aXRoIG9wZW4ocGF0aCwgInciKSBhcyBm\nOgogICAgICAgIGYud3JpdGUoY29udGVudCkKICAgIHByaW50KGYicmVwbGFjZWQge2xlbihibG9j\na3MpfSBibG9jayhzKSBpbiB7cGF0aH0iKQoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAg\nICBtYWluKCkK\nSTR_REPLACE_B64_EOF\nchmod +x /usr/local/bin/str_replace\ncommand -v python3 >/dev/null || ln -sf \"$(command -v python)\" /usr/local/bin/python3\nstr_replace --help 2>/dev/null || true\necho \"[startup] str_replace installed at /usr/local/bin/str_replace\"\n# Scrub /testbed git history past base_commit. The container ships with the\n# full upstream history (including the fix commit) \u2014 `git log` would let the\n# agent locate the fix and `git checkout <fix> -- .` would dump the gold\n# patch into the working\
+    \ tree, producing a passing `git diff --cached` with\n# zero actual problem-solving. We sever discovery by dropping ALL refs\n# (branches/tags/remotes) + the reflog and re-pointing HEAD at base, so\n# `git log`/branch/tag/reflog reveal nothing past base_commit. This does\n# NO working-tree re-hash (the old `rm -rf .git; git add -A` re-hashed every\n# file \u2192 ~10s on django, timing out at startup_timeout under colocated\n# concurrency \u2192 trajectories died at step 0 with no patch); this ref-drop is\n# ~0.15s. `git status`, `git diff`, `git diff --cached`, `git checkout -- <file>`,\n# `git show HEAD:<file>`, and the canonical submission command all still work.\n# (The fix objects remain unreachable-but-present; primary cheat defense is\n# the training-side filter in data_processing/strip_redundant.py.)\nif [ -d /testbed/.git ]; then\n    (\n        set -e\n        cd /testbed\n        BASE=$(git rev-parse HEAD)\n        git for-each-ref --format='delete %(refname)' refs | git update-ref\
+    \ --stdin\n        git update-ref refs/heads/base \"$BASE\"\n        git symbolic-ref HEAD refs/heads/base\n        git reflog expire --all --expire=now\n    )\n    echo \"[startup] /testbed/.git history severed at base (refs+reflog dropped, no rehash)\"\n    # Baseline-commit the image's OWN uncommitted setup edits so submissions\n    # contain only agent work. sweb.eval images ship harness-applied,\n    # UNCOMMITTED worktree edits (sphinx: tox.ini gains `-rA` via upstream\n    # pre_install; astropy: a pyproject.toml pin). Without this commit,\n    # `git add -A && git diff --cached` sweeps those hunks into every\n    # submission; at grade time the fresh container already has them, git\n    # apply fails on the preimage, and the `patch --batch` fallback detects\n    # \"previously applied\" and applies the hunk IN REVERSE \u2014 for sphinx that\n    # strips -rA, pytest prints no per-test result lines, the log parser\n    # finds nothing, and every sphinx traj grades unresolved (measured:\
+    \ 0\n    # solves in 14,030 release trajs; gold patches DO resolve). Tracked\n    # files only (-a); ~no-op on clean images; cheap (index intact, no\n    # rehash). See eval/FINDINGS_sphinx_grading_bug.md.\n    if ! git -C /testbed diff --quiet HEAD 2>/dev/null; then\n        git -C /testbed -c user.email=eval@nanoswe -c user.name=nanoswe-eval \\\n            commit -aqm \"harness baseline (image setup edits, pre-agent)\"\n        echo \"[startup] baseline-committed image setup edits (submissions = agent-only diffs)\"\n    fi\nfi\n"
+  salvage_command: git add -A && git diff --cached
