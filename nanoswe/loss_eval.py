@@ -2,6 +2,7 @@
 A number of functions that help with evaluating a base model.
 """
 import math
+from itertools import islice
 import torch
 import torch.distributed as dist
 
@@ -24,12 +25,14 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     It is a 1D tensor of shape (vocab_size,), indicating the number of bytes for
     each token id, or 0 if the token is to not be counted (e.g. special tokens).
     """
+    # steps=None consumes a finite corpus exactly once. Uneven/empty ranks
+    # are safe with an unwrapped model: collectives occur only after the loop.
+    # Fixed-step callers retain their existing token-budget behavior.
     # record the losses
     total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
     batch_iter = iter(batches)
-    for _ in range(steps):
-        batch = next(batch_iter)
+    for batch in (batch_iter if steps is None else islice(batch_iter, steps)):
         # Loader yields (x, y) by default, or (x, y, cu_seqlens, max_seg) when
         # the chat dataloader is in emit_cu_seqlens mode.
         if len(batch) == 4:

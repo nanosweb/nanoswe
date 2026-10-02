@@ -45,6 +45,28 @@ except ImportError:
         return cls
 
 
+# Dynamo profiles with no attention metadata. Keep runtime state lookup opaque.
+if _HAVE_VLLM_COMPILE:
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    def nanoswe_smear_slots(x: torch.Tensor, positions: torch.Tensor,
+                           input_ids: torch.Tensor, token_cache: torch.Tensor,
+                           layer_name: str) -> torch.Tensor:
+        from vllm.forward_context import get_forward_context
+        model = get_forward_context().no_compile_layers[layer_name]
+        return model._apply_smear_slots(x, positions, input_ids)
+
+    def nanoswe_smear_slots_fake(x: torch.Tensor, positions: torch.Tensor,
+                                input_ids: torch.Tensor, token_cache: torch.Tensor,
+                                layer_name: str) -> torch.Tensor:
+        return torch.empty_like(x)
+
+    if not hasattr(torch.ops.vllm, "nanoswe_smear_slots"):
+        direct_register_custom_op(
+            op_name="nanoswe_smear_slots", op_func=nanoswe_smear_slots,
+            mutates_args=["token_cache"], fake_impl=nanoswe_smear_slots_fake,
+        )
+
 # -----------------------------------------------------------------------------
 # Helpers
 
@@ -440,6 +462,14 @@ class NanoChatForCausalLM(nn.Module):
         # vLLM-mode integration: lazily attach Attention layers + RoPE if vllm_config provided.
         if vllm_config is not None:
             self._attach_vllm_attention(vllm_config, prefix)
+            self.register_buffer("_smear_token_cache", torch.zeros(
+                self._smear_cache_size * 128 + 1, dtype=torch.int32,
+                device=self.transformer.wte.weight.device), persistent=False)
+            self._smear_layer_name = f"{prefix}._nanoswe_smear"
+            registry = vllm_config.compilation_config.static_forward_context
+            if self._smear_layer_name in registry:
+                raise ValueError(f"Duplicate smear layer: {self._smear_layer_name}")
+            registry[self._smear_layer_name] = self
 
     # ---- vLLM Attention attachment ------------------------------------
 
@@ -581,9 +611,61 @@ class NanoChatForCausalLM(nn.Module):
 
         x = x.to(x.dtype)
         x = _norm(x)
-        x = self._apply_smear_vllm(x, positions)
+        assert input_ids is not None, "Smear KV caching requires token IDs"
+        x = torch.ops.vllm.nanoswe_smear_slots(
+            x, positions, input_ids, self._smear_token_cache, self._smear_layer_name,
+        )
         x = self._run_trunk_vllm(x, input_ids, cos, sin)
         return x
+
+    def _apply_smear_slots(self, x, positions, input_ids):
+        """Recover previous tokens from the full-attention physical KV slots.
+
+        Token identity is immutable while a KV slot is shared. Unlike a single
+        last-embedding row per request's first block, this stays correct when
+        requests share prefixes, diverge, or resume a cached prefix.
+        """
+        from vllm.forward_context import get_forward_context
+        ctx = get_forward_context()
+        metadata = ctx.attn_metadata
+        if isinstance(metadata, list):
+            raise NotImplementedError("Smear slot cache does not support DBO")
+        layer = self.transformer.h[-1].attn.attn
+        meta = metadata.get(layer.layer_name) if isinstance(metadata, dict) else metadata
+        gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(
+            self.smear_gate(x[..., :self.config.smear_gate_channels]))
+        if meta is None:
+            prev = F.pad(x[:-1], (0, 0, 1, 0))
+            same = (positions[1:] == positions[:-1] + 1) & (positions[1:] > 0)
+            mask = F.pad(same.to(x.dtype).unsqueeze(-1), (0, 0, 1, 0))
+            return x + gate * prev * mask
+        # FlashAttention KV layout: [2, blocks, block_size, heads, head_dim].
+        block_size = layer.kv_cache.shape[2]
+        capacity = self._smear_token_cache.numel() - 1
+        if layer.kv_cache.shape[1] * block_size > capacity:
+            raise RuntimeError("Increase smear_cache_size: KV token cache exceeds capacity")
+        starts = meta.query_start_loc[:-1].long()
+        # Full CUDA graphs can include zero-length padded request rows. Never
+        # read positions[N], nor let their duplicate writes touch real tokens.
+        active = (meta.query_start_loc[1:] > starts) & (starts < x.shape[0])
+        safe_starts = starts.clamp(min=0, max=x.shape[0] - 1)
+        start_pos = torch.where(active, positions.index_select(0, safe_starts), 0)
+        previous_pos = (start_pos - 1).clamp(min=0)
+        blocks = meta.block_table.gather(1, (previous_pos // block_size).unsqueeze(1)).squeeze(1).long()
+        previous_slots = torch.where(active & (start_pos > 0),
+                                     blocks * block_size + previous_pos % block_size, 0)
+        previous_ids = self._smear_token_cache.index_select(0, previous_slots).long()
+        cached = _norm(self.transformer.wte(previous_ids)).to(x.dtype)
+        cached = cached * (start_pos > 0).to(x.dtype).unsqueeze(-1)
+        prev = F.pad(x[:-1], (0, 0, 1, 1))
+        write_starts = torch.where(active, starts, x.shape[0])
+        prev.index_copy_(0, write_starts, cached)
+        prev = prev[:-1]
+        # Padding writes go to a dedicated sentinel, never to a real KV slot.
+        slots = meta.slot_mapping.long()
+        slots = torch.where(slots >= 0, slots, capacity)
+        self._smear_token_cache.index_copy_(0, slots, input_ids[:slots.numel()].to(torch.int32))
+        return x + gate * prev
 
     def _apply_smear_vllm(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """Branchless smear with cross-forward state — graph-safe.

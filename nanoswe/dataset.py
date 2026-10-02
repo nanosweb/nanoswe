@@ -35,6 +35,17 @@ DATASETS = {
         max_shard=1822,  # shard_00000..shard_01822, ~94MB each
         dirname="base_data_fineweb",
     ),
+    # Stack-v2 (Python) replica of the fineweb sweep. Shards are NOT downloaded
+    # from a hub URL — they are built locally from bigcode/the-stack-v2-train-smol-ids
+    # (ids only) by fetching file content anonymously from the Software Heritage
+    # S3 bucket; see scripts/stackv2/build_stackv2_data.py. Registered here only so
+    # `--flat-data=stackv2_py` resolves via get_data_dir(); the URL/max_shard below
+    # are placeholders and must not be used with the `-m nanoswe.dataset` downloader.
+    "stackv2_py": dict(
+        base_url="https://huggingface.co/datasets/bigcode/the-stack-v2-train-smol-ids/resolve/main",
+        max_shard=-1,  # built locally, not downloadable
+        dirname="base_data_stackv2_py",
+    ),
 }
 DEFAULT_DATASET = "climbmix"
 

@@ -150,8 +150,18 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     torch.manual_seed(_seed)
     if device_type == "cuda":
         torch.cuda.manual_seed(_seed)
-    # skipping full reproducibility for now, possibly investigate slowdown later
-    # torch.use_deterministic_algorithms(True)
+    # Opt-in FULL determinism (NANOSWE_DETERMINISTIC=1) for bit-parity studies, e.g.
+    # reuse (2-job) vs single-job. Forces cuBLAS/cuDNN to context-independent algorithms
+    # so kernel selection no longer depends on process/workspace state. Requires
+    # CUBLAS_WORKSPACE_CONFIG set in the environment BEFORE torch init (the runner exports
+    # it from the cfg env). Has a throughput cost, so it is off by default.
+    if os.environ.get("NANOSWE_DETERMINISTIC", "0") == "1":
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        if device_type == "cuda":
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        print(f"[rank {os.environ.get('RANK','0')}] Deterministic algorithms ON "
+              f"(CUBLAS_WORKSPACE_CONFIG={os.environ.get('CUBLAS_WORKSPACE_CONFIG','<unset!>')})")
 
     # Precision
     if device_type == "cuda":
