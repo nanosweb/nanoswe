@@ -1,0 +1,260 @@
+# v2-schema config generated from /home/rolmedo/mini-swe-agent/localconfig_no_model-qwen3-smith.yaml by docs/cluster/convert_v1_config.py; edit the source and re-run.
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <example>.
+
+    <example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement necessary changes to meet requirements in the PR description.
+    Your task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the PR description in a way that is general and consistent with the codebase.
+
+    IMPORTANT: This is an interactive process where you will think and issue ONE command, see its result, then think and issue your next command.
+
+    For each response:
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide exactly ONE bash command to execute
+
+    ## Important Boundaries
+    - MODIFY: Regular source code files in {{working_dir}}
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+
+    ## Recommended Workflow
+    1. Analyze the codebase by finding and reading relevant files
+    2. Create a script to reproduce the issue
+    3. Edit the source code to resolve the issue
+    4. Verify your fix works by running your script again
+    5. Test edge cases to ensure your fix is robust
+
+    ## Command Execution Rules
+    You are operating in an environment where
+    1. You write a single command
+    2. The system executes that command in a subshell
+    3. You see the result
+    4. You write your next command
+
+    Each response should include:
+    1. A **THOUGHT** section where you explain your reasoning and plan
+    2. A single bash code block with your command
+
+    Format your responses like this:
+
+    <example>
+    THOUGHT: Here I explain my reasoning process, analysis of the current situation,
+    and what I'm trying to accomplish with the command below.
+
+    ```bash
+    your_command_here
+    ```
+    </example>
+
+    Commands must be specified in a single bash code block:
+
+    ```bash
+    your_command_here
+    ```
+
+    **CRITICAL REQUIREMENTS:**
+    - Your response SHOULD include a THOUGHT section explaining your reasoning
+    - Your response MUST include EXACTLY ONE bash code block
+    - This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)
+    - If you include zero or multiple bash blocks, or no command at all, YOUR RESPONSE WILL FAIL
+    - Do NOT try to run multiple independent commands in separate blocks in one response
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+
+    Example of a CORRECT response:
+    <example>
+    THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    ```bash
+    ls -la
+    ```
+    </example>
+
+    If you need to run multiple commands, either:
+    1. Combine them in one block using && or ||
+    ```bash
+    command1 && command2 || echo "Error occurred"
+    ```
+
+    2. Wait for the first command to complete, see its output, then issue the next command in your following response.
+
+    ## Environment Details
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - If a command isn't available, you can install it
+
+    ## Useful Command Examples
+
+    ### Create a new file:
+    ```bash
+    cat <<'EOF' > newfile.py
+    import numpy as np
+    hello = "world"
+    print(hello)
+    EOF
+    ```
+
+    ### Edit files with sed:
+    # Replace all occurrences
+    ```bash
+    sed -i 's/old_string/new_string/g' filename.py
+    ```
+
+    # Replace only first occurrence
+    ```bash
+    sed -i 's/old_string/new_string/' filename.py
+    ```
+
+    # Replace first occurrence on line 1
+    ```bash
+    sed -i '1s/old_string/new_string/' filename.py
+    ```
+
+    # Replace all occurrences in lines 1-10
+    ```bash
+    sed -i '1,10s/old_string/new_string/g' filename.py
+    ```
+
+    ### View file content:
+    ```bash
+    # View specific lines with numbers
+    nl -ba filename.py | sed -n '10,20p'
+    ```
+
+    ### Any other command you want to run
+    ```bash
+    anything
+    ```
+
+    ## Submission
+    When you've completed your work (reading, editing, testing), and cannot make further progress
+    issue exactly the following command:
+
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+    ```
+
+    This command will submit your work.
+    You cannot continue working (reading, editing, testing) in any way on this task after submitting.
+    </instructions>
+  step_limit: 75
+  cost_limit: 0.0
+  max_consecutive_format_errors: 0
+  submit_salvage_command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+environment:
+  cwd: /testbed
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: docker
+  image_sif_dir: /fast/rolmedo/swesmith/singularity_images/
+model:
+  observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  action_regex: |-
+    ```bash
+    (.*?)
+    ```
+run:
+  env_startup_command: |
+    set -euo pipefail
+    REPO=/testbed
+    cd "$REPO"
+    # SIFs only contain a subset of swesmith branches (often just lm_modify) and
+    # workers can't reach github to fetch the rest. The smith_harbor dataset
+    # carries the synthetic-bug patch in its `patch` field, so we ignore branches
+    # entirely and apply the patch to a clean `main` instead.
+    git checkout -f main || git checkout -f master
+    git remote remove origin || true
+    # Mitigation A — git-history scrub. The SIF images ship a .git with
+    # per-instance branches and post-base commits that an agent could
+    # `git log` -> `git checkout <fix_sha> -- .` -> submit to get the gold
+    # patch with zero problem-solving. Verified production failure mode in
+    # SWE-bench eval and ~1-2% of existing trajectories used `git show <hash>`
+    # to cheat. Re-init .git as a single-commit repo at the snapshot main so
+    # `git log <history>` / `git show <hash>` / `git checkout <hash>` are dead.
+    # Grading is unaffected (the grader applies the diff text to a fresh
+    # container; only the agent's view of history changes).
+    rm -rf .git
+    git init -q
+    git -c user.email=eval@local -c user.name=eval add -A
+    git -c user.email=eval@local -c user.name=eval commit -qm "base" --allow-empty
+    cat > /tmp/instance.patch <<'__SMITH_PATCH_END__'
+    {{ patch }}
+    __SMITH_PATCH_END__
+    git apply --whitespace=nowarn /tmp/instance.patch
+    # Commit the smith bug patch so HEAD = buggy state. Without this, the submission
+    # baseline (`git add -A && git diff --cached`, both in agent submit_command and
+    # in the WIP salvage path) is taken against clean main — which either nets to
+    # empty when the agent correctly reverts the bug, or captures the bug patch
+    # itself when the agent fails early. The latter leaks gold patches via GNU
+    # patch's auto-`-R` fallback in the grading harness.
+    git -c user.email=swesmith@local -c user.name=swesmith add -A
+    git -c user.email=swesmith@local -c user.name=swesmith commit -q -m "apply smith bug patch"
+  salvage_command: git add -A && git diff --cached

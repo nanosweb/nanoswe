@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: vllm-nanoswe-plugin
+Version: 0.2.0
+Requires-Python: >=3.10

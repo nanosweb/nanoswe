@@ -1,0 +1,130 @@
+# v2-schema config generated from /fast/rolmedo/grug-b200/data/grug_agent.yaml by docs/cluster/convert_v1_config.py; edit the source and re-run.
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <example>.
+
+    <example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </example>
+
+    For editing files, you may use the `str_replace` command, which performs an exact-match substitution. Provide one or more search/replace blocks via a heredoc:
+
+    ```bash
+    str_replace path/to/file <<'PATCH'
+    <<<<<<<<< SEARCH
+    exact existing text
+    =========
+    new text
+    >>>>>>>>> REPLACE
+    PATCH
+    ```
+
+    The SEARCH block must match exactly one location in the file. To create a new file, use a `cat` heredoc:
+
+    ```bash
+    cat > path/to/file <<'EOF'
+    file contents
+    EOF
+    ```
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |-
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+
+    <instructions>
+    # Task Instructions
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement necessary changes to fix the issue described in the PR description.
+    Make changes to non-test files in the current directory in a way that is general and consistent with the codebase.
+
+    This is an interactive process: think, issue ONE command, observe its output, then continue.
+    </instructions>
+  step_limit: 100
+  cost_limit: 0.0
+  max_consecutive_format_errors: 0
+  submit_salvage_command: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && git add -A && git diff --cached
+environment:
+  cwd: /testbed
+  timeout: 300
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  environment_class: singularity
+  image_sif_dir: /fast/rolmedo/swesmith/singularity_images
+model:
+  observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+
+    Please format your action in triple backticks as shown in <response_example>.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  action_regex: |-
+    ```bash
+    (.*?)
+    ```
+run:
+  env_startup_command: |
+    set -e
+    command -v python3 >/dev/null || ln -sf "$(command -v python)" /usr/local/bin/python3
+    # Mitigation A — git-history scrub. SWE-bench Verified containers ship
+    # /testbed/.git with FULL upstream history past base_commit, including the
+    # fix commit for the very issue being evaluated. Re-init .git as a
+    # single-commit repo at the bug-commit working tree so the agent can't
+    # `git log` and find the fix.
+    if [ -d /testbed/.git ]; then
+      cd /testbed
+      rm -rf .git
+      git init -q
+      git -c user.email=eval@local -c user.name=eval add -A
+      git -c user.email=eval@local -c user.name=eval commit -qm "base" --allow-empty
+    fi
+  salvage_command: git add -A && git diff --cached

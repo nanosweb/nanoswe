@@ -2,35 +2,48 @@
 # =============================================================================
 # nanoswe speedrun record — 192 B200-hour track
 #
-# The record run (`nanoswe-192h-260812`): 11,295 steps in 182.2/192 GPU-h
-# (22.7 h wall on 8x B200), SWE-bench Verified pass@1 11.0%.
-#   weights: https://huggingface.co/nanoswe/nanoswe-192h-260812
-#   data:    https://huggingface.co/datasets/nanoswe/nanoswe-trajs-260812
+# The record run (`nanoswe-192h-261002`): 13,024 steps in 174.6/192 GPU-h
+# (21.8 h wall on 8x B200), SWE-bench Verified pass@1 15.65% (483-instance
+# subset, 5 samples per problem; previous record re-graded on the same
+# serving: 11.76%).
+#   weights: https://huggingface.co/nanoswe/nanoswe-192h-261002
+#   data:    https://huggingface.co/datasets/nanoswe/nanoswe-trajs-261002
 #   log:     speedrun.log (this branch; ends with the exported weights' sha256)
 #
-# RECIPE: depth-42 (5.67B params), 32k context, SSSL sliding-window attention,
-# fp8, doc-mask, RoPE theta 1e6, per-token loss throughout; ~23.7B tokens over
-# a 3-phase data curriculum with crossfade transitions, all in ONE process over
-# one continuous global step (see nanoswe/phases.py). LR is one continuous
-# piecewise-linear envelope (warmup 40 steps -> 1.0, annealed down to 0.05):
-#   pI   4,406 it  broad mix: smith-extra(unverified) / zero / smith-short /
-#                  zero-extra / hero-extra          LR 1.0    -> 0.94139
-#   xf1    694 it  data crossfade pI -> pII         LR        -> 0.85159
-#   pII  1,633 it  concentrate: smith-extra(verified) / zero
-#                                                   LR        -> 0.64029
-#   xf2    640 it  data crossfade pII -> pIII       LR        -> 0.55748
-#   pIII 3,922 it  finish: mini-coder / zero        LR        -> 0.05
-# Mixture weights set token shares, drawn with credit-SWRR; origins are
-# (origin, verified) slices of the consolidated Hub dataset above.
+# WHAT CHANGED vs nanoswe-192h-260812: the training data. Same idea (train a
+# nanoswe transformer from scratch on agent trajectories only, no web text),
+# but on SWE-smith trajectories from Nemotron-3.5-Lightning in the tool-call
+# format: the model emits one JSON tool call (bash / file_editor) per turn
+# inside <|python_start|> ... <|python_end|> and reads the result as the next
+# user turn. 1,383,822 trajectories over 1,133 repositories (none of them a
+# SWE-bench source repository or a fork/mirror of one). Evaluated with the
+# matching tool-call agent in eval/ (eval/README.md).
+#
+# RECIPE: depth-40 (3.23B scaling params), 32k context, SSSL sliding-window
+# attention, fp8, doc-mask, RoPE theta 1e6, softcap 15, per-token loss; ONE
+# phase of 13,024 steps x 1,835,008 tokens = 23.9B tokens (7.4 tokens/param),
+# WSD schedule (warmup 40 steps, flat, linear warmdown over the last 65% to
+# 0.05). The corpus is read in its stored instance-stratified order: row groups
+# are shuffled with seed 3001 and dealt round-robin to the 8 ranks
+# ("rg_interleave": 1 = drain one row group at a time; 23.9B tokens is ~one
+# pass). Weight decay 0.28 follows the T_epoch rule at the ratio-8 reference
+# (=> 0.017858 at this depth and batch), cosine-decayed to 0.
 #
 # --max-gpu-hours=192 is the competition cutoff (rules: the clock starts after
 # the first step; no step once the budget is spent). This recipe's horizon
-# finished at 182.2 GPU-h on the reference node, inside the budget.
+# finished at 174.6 GPU-h on the reference node, inside the budget. (The
+# original run was launched without the cap, i.e. --max-gpu-hours=-1; the cap
+# never binds for this horizon and does not change the numerics.)
 #
 # Prereqs (see README.md): the uv-synced env, a tokenizer at
 # $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl, and the corpus — set
-# NANOSWE_TRAJS_DIR to a local copy, or it is snapshot-downloaded from the Hub
-# dataset above (NANOSWE_TRAJS_REPO).
+# NANOSWE_TRAJS_DIR to a local copy of the Hub dataset above (train shards at
+# its root, the held-out val/ next to them), or it is snapshot-downloaded
+# (NANOSWE_TRAJS_REPO). val/ is only scored at step 0 and at the end (outside
+# the training clock). The original run also scored an internal test set of
+# teacher trajectories on SWE-bench Verified instances (the
+# bpb_base_data_smith_v3_test_trainfmt lines in speedrun.log); it is not
+# released and never trained on, and scoring it does not touch training.
 # =============================================================================
 set -euo pipefail
 
@@ -42,48 +55,40 @@ export NANOSWE_BASE_DIR="${NANOSWE_BASE_DIR:?set NANOSWE_BASE_DIR (holds tokeniz
 export OMP_NUM_THREADS=1
 export NANOSWE_FUSED_LCE="${NANOSWE_FUSED_LCE:-1}"     # fused linear cross-entropy (token loss)
 export WANDB_MODE="${WANDB_MODE:-disabled}"            # "online" + WANDB_API_KEY to log
-export NANOSWE_TRAJS_REPO="${NANOSWE_TRAJS_REPO:-nanoswe/nanoswe-trajs-260812}"
+export NANOSWE_TRAJS_REPO="${NANOSWE_TRAJS_REPO:-nanoswe/nanoswe-trajs-261002}"
 NPROC="${NPROC:-8}"
 MAX_GPU_HOURS="${MAX_GPU_HOURS:-192}"                  # competition budget (-1 = uncapped)
-TAG="${MODEL_TAG:-nanoswe-192h-260812}"
+TAG="${MODEL_TAG:-nanoswe-192h-261002}"
 
-# ---- sanity ----------------------------------------------------------------
+# ---- sanity + corpus ----------------------------------------------------------
 [ -f "$NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl" ] || { echo "ERROR: tokenizer missing at $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl"; exit 1; }
-if [ -n "${NANOSWE_TRAJS_DIR:-}" ]; then
-  ls "$NANOSWE_TRAJS_DIR"/*.parquet >/dev/null 2>&1 || { echo "ERROR: NANOSWE_TRAJS_DIR=$NANOSWE_TRAJS_DIR has no parquet shards"; exit 1; }
-else
-  echo "NOTE: NANOSWE_TRAJS_DIR unset; will snapshot-download $NANOSWE_TRAJS_REPO from the Hub"
+if [ -z "${NANOSWE_TRAJS_DIR:-}" ]; then
+  echo "NOTE: NANOSWE_TRAJS_DIR unset; snapshot-downloading $NANOSWE_TRAJS_REPO from the Hub"
+  NANOSWE_TRAJS_DIR="$(python -c "from huggingface_hub import snapshot_download as s; print(s('$NANOSWE_TRAJS_REPO', repo_type='dataset'))")"
 fi
+export NANOSWE_TRAJS_DIR
+n_train=$(ls "$NANOSWE_TRAJS_DIR"/train-*.parquet 2>/dev/null | wc -l)
+[ "$n_train" -eq 168 ] || { echo "ERROR: expected 168 train shards at the root of $NANOSWE_TRAJS_DIR, found $n_train"; exit 1; }
+ls "$NANOSWE_TRAJS_DIR"/val/*.parquet >/dev/null || { echo "ERROR: $NANOSWE_TRAJS_DIR needs val/"; exit 1; }
 
-# ---- recipe: 3 phases + 2 crossfades, one continuous global step ------------
-# num_iterations sum = 11,295; TBS 2,097,152 tok => ~23.7B tokens.
-PHASES="$(cat <<'JSON'
-[
-  {"name":"pI","num_iterations":4406,"loss_norm":"token","lr_schedule":"wsd","warmup_steps":40,"lr_start_frac":1.0,"final_lr_frac":0.94139,"warmdown_ratio":0.10281,
-   "mixture":[{"origin":"swe-smith-extra","verified":false,"weight":505.2308,"seed":1001},
-              {"origin":"swe-zero","weight":221.256,"seed":1002},
-              {"origin":"swe-smith-extra-short","weight":113.686,"seed":1003},
-              {"origin":"swe-zero-extra","weight":91.8392,"seed":1004},
-              {"origin":"swe-hero-extra","weight":67.988,"seed":1005}]},
-  {"name":"xf1","num_iterations":694,"loss_norm":"token","lr_schedule":"wsd","warmup_steps":0,"lr_start_frac":0.94139,"final_lr_frac":0.85159,"warmdown_ratio":1.0,
-   "transition_from":"pI","transition_to":"pII"},
-  {"name":"pII","num_iterations":1633,"loss_norm":"token","lr_schedule":"wsd","warmup_steps":0,"lr_start_frac":0.85159,"final_lr_frac":0.64029,"warmdown_ratio":1.0,
-   "mixture":[{"origin":"swe-smith-extra","verified":true,"weight":748.3131,"seed":2001},
-              {"origin":"swe-zero","weight":251.6869,"seed":2002}]},
-  {"name":"xf2","num_iterations":640,"loss_norm":"token","lr_schedule":"wsd","warmup_steps":0,"lr_start_frac":0.64029,"final_lr_frac":0.55748,"warmdown_ratio":1.0,
-   "transition_from":"pII","transition_to":"pIII"},
-  {"name":"pIII","num_iterations":3922,"loss_norm":"token","lr_schedule":"wsd","warmup_steps":0,"lr_start_frac":0.55748,"final_lr_frac":0.05,"warmdown_ratio":1.0,
-   "mixture":[{"origin":"ricdomolm/mini-coder-trajs-400k","weight":563.0509,"seed":3001},
-              {"origin":"swe-zero","weight":436.9491,"seed":3002}]}
-]
-JSON
+# ---- recipe: one phase ------------------------------------------------------
+# 13,024 it x TBS 1,835,008 tok => 23,899,144,192 tokens. "dir" = the train
+# shards (every shard, split "all"; the held-out val/ lives in a subdir).
+PHASES="$(python - "$NANOSWE_TRAJS_DIR" <<'PY'
+import json, sys
+print(json.dumps([
+  {"name": "pIII", "num_iterations": 13024, "loss_norm": "token", "lr_schedule": "wsd", "warmup_steps": 40,
+   "lr_start_frac": 1.0, "final_lr_frac": 0.05, "warmdown_ratio": 0.65,
+   "mixture": [{"origin": None, "dir": sys.argv[1], "split": "all", "weight": 1000.0, "seed": 3001, "rg_interleave": 1}]}
+]))
+PY
 )"
 
 echo "=== nanoswe 192h record  tag=$TAG  start $(date '+%F %T')  budget=${MAX_GPU_HOURS} GPU-h on ${NPROC} GPUs ==="
 torchrun --standalone --nproc_per_node="$NPROC" -m scripts.base_train -- \
-    --depth=42 \
+    --depth=40 \
     --target-param-data-ratio=8 \
-    --total-batch-size=2097152 \
+    --total-batch-size=1835008 \
     --device-batch-size=1 \
     --max-seq-len=32768 \
     --window-pattern=SSSL \
@@ -93,8 +98,12 @@ torchrun --standalone --nproc_per_node="$NPROC" -m scripts.base_train -- \
     --logit-softcap=15 \
     --max-gpu-hours="$MAX_GPU_HOURS" \
     --phases="$PHASES" \
-    --eval-every=-1 \
+    --eval-every=13024 \
+    --val-chat-dir="$NANOSWE_TRAJS_DIR/val" \
+    --eval-chat-tokens=40108032 \
+    --val-sequential-pack \
     --no-save-optimizer \
+    ${CHECKPOINT_STAGE_DIR:+--checkpoint-stage-dir="$CHECKPOINT_STAGE_DIR"} \
     --model-tag="$TAG" \
     --run="$TAG"
 

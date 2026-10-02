@@ -28,7 +28,7 @@ class GlobalModelStats:
             self._cost += cost
             self._n_calls += 1
         if 0 < self.cost_limit < self._cost or 0 < self.call_limit < self._n_calls + 1:
-            raise RuntimeError(f"Global cost/call limit exceeded: ${self._cost:.4f} / {self._n_calls + 1}")
+            raise RuntimeError(f"Global cost/call limit exceeded: ${self._cost:.4f} / {self._n_calls}")
 
     @property
     def cost(self) -> float:
@@ -52,8 +52,12 @@ def get_model(input_model_name: str | None = None, config: dict | None = None) -
 
     model_class = get_model_class(resolved_model_name, config.pop("model_class", ""))
 
-    if (from_env := os.getenv("MSWEA_MODEL_API_KEY")) and not str(type(model_class)).endswith("DeterministicModel"):
-        config.setdefault("model_kwargs", {})["api_key"] = from_env
+    if (
+        any(s in resolved_model_name.lower() for s in ["anthropic", "sonnet", "opus", "claude"])
+        and "set_cache_control" not in config
+    ):
+        # Select cache control for Anthropic models by default
+        config["set_cache_control"] = "default_end"
 
     return model_class(**config)
 
@@ -72,7 +76,19 @@ def get_model_name(input_model_name: str | None = None, config: dict | None = No
 
 
 _MODEL_CLASS_MAPPING = {
+    "litellm": "minisweagent.models.litellm_model.LitellmModel",
+    "litellm_textbased": "minisweagent.models.litellm_textbased_model.LitellmTextbasedModel",
+    "litellm_response": "minisweagent.models.litellm_response_model.LitellmResponseModel",
+    "openrouter": "minisweagent.models.openrouter_model.OpenRouterModel",
+    "openrouter_textbased": "minisweagent.models.openrouter_textbased_model.OpenRouterTextbasedModel",
+    "openrouter_response": "minisweagent.models.openrouter_response_model.OpenRouterResponseModel",
+    "portkey": "minisweagent.models.portkey_model.PortkeyModel",
+    "portkey_response": "minisweagent.models.portkey_response_model.PortkeyResponseAPIModel",
+    "requesty": "minisweagent.models.requesty_model.RequestyModel",
     "vllm": "minisweagent.models.vllm_model.VLLMModel",
+    "qwen3": "minisweagent.models.qwen3.Qwen3Model",
+    "litellm_scheduled": "minisweagent.models.litellm_scheduled.ScheduledLitellmModel",
+    "deterministic": "minisweagent.models.test_models.DeterministicModel",
 }
 
 
@@ -94,7 +110,7 @@ def get_model_class(model_name: str, model_class: str = "") -> type:
             msg = f"Unknown model class: {model_class} (resolved to {full_path}, available: {_MODEL_CLASS_MAPPING})"
             raise ValueError(msg)
 
-    # This release ships a single client: the lean local-vLLM HTTP client.
-    from minisweagent.models.vllm_model import VLLMModel
+    # Default to LitellmModel
+    from minisweagent.models.litellm_model import LitellmModel
 
-    return VLLMModel
+    return LitellmModel
