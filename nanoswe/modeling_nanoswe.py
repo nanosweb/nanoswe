@@ -1,13 +1,13 @@
 """vLLM-compatible NanoChatForCausalLM.
 
-Mirrors nanoswe.gpt.GPT exactly so a converted state_dict (after stripping
+Mirrors nanochat.gpt.GPT exactly so a converted state_dict (after stripping
 `_orig_mod.`) loads with no key remapping.
 
 Two execution modes:
 
 * **Standalone** — call `forward(input_ids)` with shape `(B, T)` and the model
-  runs the same forward pass as `nanoswe.gpt.GPT.forward(idx)` (no kv-cache).
-  Used for the logit-equivalence test against nanoswe.
+  runs the same forward pass as `nanochat.gpt.GPT.forward(idx)` (no kv-cache).
+  Used for the logit-equivalence test against nanochat.
 
 * **vLLM** — call `forward(input_ids, positions, ...)` with flat `(N,)` tensors
   and a populated `vllm.forward_context`. Uses `vllm.model_executor.layers.attention.Attention`
@@ -27,6 +27,7 @@ The 10 architectural quirks are preserved verbatim:
 10. RoPE base=100000                    — `_precompute_rope`
 """
 
+import os
 from collections.abc import Iterable
 from typing import Optional
 
@@ -43,6 +44,22 @@ except ImportError:
     _HAVE_VLLM_COMPILE = False
     def support_torch_compile(cls):
         return cls
+
+
+# Env-gated smear diagnostics — read ONCE at import (per-process constants),
+# so torch.compile sees fixed booleans and the default (both unset) traced
+# graph is identical to the flag-free code.
+#   NANOCHAT_SMEAR_STATS=1 — count duplicate-key writes to the cross-forward
+#     smear cache (block_table[:,0] collides across prefix-sharing requests)
+#     and print a one-line summary every 512 saves.
+#   NANOCHAT_SMEAR_GUARD=1 — tag each smear-cache row with the writer's token
+#     position; on read, zero (treat as miss) any row whose tag doesn't match
+#     the reader's expected position (positions[start]-1).  Converts
+#     cross-request smear corruption into a missing smear at mismatched rows;
+#     correct same-request handoffs are unaffected.
+_SMEAR_STATS = bool(os.environ.get("NANOCHAT_SMEAR_STATS"))
+_SMEAR_GUARD = bool(os.environ.get("NANOCHAT_SMEAR_GUARD"))
+
 
 
 # Dynamo profiles with no attention metadata. Keep runtime state lookup opaque.
@@ -72,14 +89,14 @@ if _HAVE_VLLM_COMPILE:
 
 
 def _norm(x: torch.Tensor) -> torch.Tensor:
-    """RMSNorm with no learnable weight (matches nanoswe.gpt.norm)."""
+    """RMSNorm with no learnable weight (matches nanochat.gpt.norm)."""
     return F.rms_norm(x, (x.size(-1),))
 
 
 class _Linear(nn.Linear):
     """nn.Linear that casts its weight to the input dtype in forward.
 
-    Matches `nanoswe.gpt.Linear` so that mixed-precision behavior (fp32 master
+    Matches `nanochat.gpt.Linear` so that mixed-precision behavior (fp32 master
     weights, bf16 activations) is identical between the two implementations.
     """
 
@@ -88,7 +105,7 @@ class _Linear(nn.Linear):
 
 
 def _apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Half-split rotary embedding (matches nanoswe.gpt.apply_rotary_emb).
+    """Half-split rotary embedding (matches nanochat.gpt.apply_rotary_emb).
 
     `x` is `(..., head_dim)`, `cos` and `sin` are broadcastable to `(..., head_dim/2)`.
     """
@@ -127,7 +144,7 @@ class NanoChatMLP(nn.Module):
 
 
 class NanoChatMoEMLP(nn.Module):
-    """Inference port of nanoswe.gpt.MoEMLP (DeepSeekMoE-style, aux-loss-free routing).
+    """Inference port of nanochat.gpt.MoEMLP (DeepSeekMoE-style, aux-loss-free routing).
 
     Eval-only — drops the training-time z-loss / load tracking. Mirrors the trained
     state_dict layout (router.weight, router_bias, expert_c_fc, expert_c_proj, optional
@@ -221,10 +238,25 @@ class NanoChatMoEMLP(nn.Module):
         return out.view(orig_shape)
 
 
+def compute_window_sizes(config: NanoChatConfig) -> list[Optional[int]]:
+    """Per-layer left attention window (None = full context), mirroring
+    `nanochat.gpt.GPT._compute_window_sizes`: the pattern string is tiled across layers,
+    L = sequence_len (treated as full context here), S = ceil(sequence_len/4/128)*128,
+    and the final layer is always L."""
+    seq_len = getattr(config, "sequence_len", None) or config.max_position_embeddings
+    pattern = (config.window_pattern or "L").upper()
+    assert all(c in "SL" for c in pattern), f"Invalid window_pattern: {pattern}. Use only S and L."
+    short = -(-seq_len // 4 // 128) * 128
+    n = config.num_hidden_layers
+    out: list[Optional[int]] = [None if pattern[i % len(pattern)] == "L" else short for i in range(n)]
+    out[-1] = None
+    return out
+
+
 class NanoChatAttention(nn.Module):
     """Self-attention block with QK-norm, RoPE, and value-embedding injection.
 
-    Matches `nanoswe.gpt.CausalSelfAttention` parameter names exactly so the
+    Matches `nanochat.gpt.CausalSelfAttention` parameter names exactly so the
     state_dict loads without remapping.
     """
 
@@ -242,6 +274,7 @@ class NanoChatAttention(nn.Module):
         self.c_v = _Linear(n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = _Linear(n_embd, n_embd, bias=False)
 
+        self.window: Optional[int] = compute_window_sizes(config)[layer_idx]   # standalone path only
         self.has_ve = has_ve(layer_idx, config.num_hidden_layers)
         self.ve_gate_channels = config.ve_gate_channels
         if self.has_ve:
@@ -288,9 +321,9 @@ class NanoChatAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        """Standalone (B, T, C) forward — mirrors nanoswe.gpt CausalSelfAttention.
+        """Standalone (B, T, C) forward — mirrors nanochat.gpt CausalSelfAttention.
 
-        nanoswe scales `q` and `k` each by 1.2 then calls flash_attn with the
+        nanochat scales `q` and `k` each by 1.2 then calls flash_attn with the
         default scale of `1/sqrt(d)`.  We do the same with SDPA: pre-scale
         q,k and let SDPA's default scale apply.
         """
@@ -309,7 +342,12 @@ class NanoChatAttention(nn.Module):
             repeat = self.n_head // self.n_kv_head
             k_ = k_.repeat_interleave(repeat, dim=1)
             v_ = v_.repeat_interleave(repeat, dim=1)
-        y = F.scaled_dot_product_attention(q_, k_, v_, is_causal=True)
+        if self.window is not None and T > self.window:
+            i = torch.arange(T, device=q_.device)
+            allowed = (i[None, :] <= i[:, None]) & (i[:, None] - i[None, :] <= self.window)   # == flash_attn window_size=(window, 0)
+            y = F.scaled_dot_product_attention(q_, k_, v_, attn_mask=allowed)
+        else:
+            y = F.scaled_dot_product_attention(q_, k_, v_, is_causal=True)
         y = y.transpose(1, 2).reshape(B, T, -1).contiguous()
         return self.c_proj(y)
 
@@ -361,7 +399,7 @@ class NanoChatBlock(nn.Module):
 
 @support_torch_compile
 class NanoChatForCausalLM(nn.Module):
-    """vLLM-facing class.  Parameter names match nanoswe.gpt.GPT exactly."""
+    """vLLM-facing class.  Parameter names match nanochat.gpt.GPT exactly."""
 
     def __init__(
         self,
@@ -382,7 +420,7 @@ class NanoChatForCausalLM(nn.Module):
         kv_dim = config.num_key_value_heads * config.head_dim
         padded_vocab_size = config.padded_vocab_size
 
-        # Match nanoswe.gpt structure exactly so state_dict keys are identical.
+        # Match nanochat.gpt structure exactly so state_dict keys are identical.
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(padded_vocab_size, n),
             "h": nn.ModuleList([NanoChatBlock(config, i) for i in range(n_layer)]),
@@ -408,12 +446,12 @@ class NanoChatForCausalLM(nn.Module):
         })
 
         # RoPE buffers — recomputed deterministically; not persisted.
-        # Over-compute by 10× to match nanoswe behavior (gpt.py:195).
+        # Over-compute by 10× to match nanochat behavior (gpt.py:195).
         rotary_seq_len = config.max_position_embeddings * 10
         # Resolve rope_theta: vLLM 0.17 keeps it as a top-level attr, but
         # 0.20+/transformers v5 may move it into a `rope_parameters` dict
         # depending on which patch path ran.  Try both, fall back to the
-        # nanoswe default (100000.0).
+        # nanochat default (100000.0).
         rope_theta = getattr(config, "rope_theta", None)
         if rope_theta is None:
             rope_params = getattr(config, "rope_parameters", None) or {}
@@ -459,9 +497,31 @@ class NanoChatForCausalLM(nn.Module):
             persistent=False,
         )
 
+        # Env-gated smear diagnostics (default off; see module-level flags).
+        if _SMEAR_STATS:
+            # Duplicate-key write counters.  `_ss_forwards` is a python int so
+            # the every-512 print check never syncs; the two accumulators are
+            # lazily-allocated GPU scalars updated sync-free per save.
+            self._ss_forwards = 0
+            self._ss_collisions_t = None
+            self._ss_maxdup_t = None
+        if _SMEAR_GUARD:
+            # Position tag per smear-cache row: the writer's token position at
+            # the saved (last) token, or -1 if never written.  The read side
+            # zeroes any cached row whose tag != positions[start]-1, treating
+            # it as a miss instead of injecting a foreign request's embedding.
+            # Registered non-persistent like `_smear_prev_cache` (same
+            # identity-stability requirements for cudagraph capture).
+            self.register_buffer(
+                "_smear_prev_pos",
+                torch.full((self._smear_cache_size,), -1, dtype=torch.int32),
+                persistent=False,
+            )
+
         # vLLM-mode integration: lazily attach Attention layers + RoPE if vllm_config provided.
         if vllm_config is not None:
             self._attach_vllm_attention(vllm_config, prefix)
+            # Integer token IDs avoid storing a full embedding per physical slot.
             self.register_buffer("_smear_token_cache", torch.zeros(
                 self._smear_cache_size * 128 + 1, dtype=torch.int32,
                 device=self.transformer.wte.weight.device), persistent=False)
@@ -480,7 +540,20 @@ class NanoChatForCausalLM(nn.Module):
         head_dim = self.config.head_dim
         scale = head_dim ** -0.5  # SDPA-style; the 1.2 split scale is in q/k
 
+        # Per-layer sliding windows (2026-09-16 fix). Until now every layer was built as full-context
+        # attention, but nanochat.gpt trains with `window_pattern` (default "SSSL": three of four layers
+        # attend to the last sequence_len/4 tokens only). Serving them full-context is a train/serve
+        # mismatch for any context longer than the short window (8192 at 32k) and wastes KV cache
+        # (~2.3x at full context). Convention: training passes flash_attn window_size=(w, 0), i.e. a
+        # query attends to keys with i - j <= w (w previous tokens plus itself); vLLM's FlashAttention
+        # backend converts per_layer_sliding_window=n into window_size=(n - 1, 0), hence n = w + 1.
+        # L layers stay full attention (their (sequence_len, 0) window only differs beyond the trained
+        # length). NANOCHAT_VLLM_DISABLE_WINDOWS=1 restores the old behaviour for A/B tests.
+        windows = compute_window_sizes(self.config)
+        if os.environ.get("NANOCHAT_VLLM_DISABLE_WINDOWS", "0") == "1":
+            windows = [None] * len(windows)
         for i, block in enumerate(self.transformer.h):
+            w = windows[i]
             block.attn.attn = Attention(
                 num_heads=self.config.num_attention_heads,
                 head_size=head_dim,
@@ -488,6 +561,7 @@ class NanoChatForCausalLM(nn.Module):
                 num_kv_heads=self.config.num_key_value_heads,
                 cache_config=cache_config,
                 quant_config=vllm_config.quant_config,
+                per_layer_sliding_window=(w + 1) if w is not None else None,
                 prefix=f"{prefix}.transformer.h.{i}.attn.attn",
             )
 
@@ -503,16 +577,19 @@ class NanoChatForCausalLM(nn.Module):
             self.cos = self.cos.to(device=device, dtype=model_dtype)
             self.sin = self.sin.to(device=device, dtype=model_dtype)
             self._smear_prev_cache = self._smear_prev_cache.to(device=device, dtype=model_dtype)
+            if _SMEAR_GUARD:
+                # int32 tag buffer: move device only (dtype must stay int32).
+                self._smear_prev_pos = self._smear_prev_pos.to(device=device)
 
-    # ---- standalone forward (for equivalence with nanoswe.gpt.GPT) ----
+    # ---- standalone forward (for equivalence with nanochat.gpt.GPT) ----
 
     def forward_standalone(self, idx: torch.Tensor) -> torch.Tensor:
-        """Run a `(B, T)` forward identical to `nanoswe.gpt.GPT.forward(idx)`.
+        """Run a `(B, T)` forward identical to `nanochat.gpt.GPT.forward(idx)`.
 
         Returns logits of shape `(B, T, vocab_size)` after softcap.
         """
         B, T = idx.shape
-        assert T > 1, "Standalone forward expects T > 1 (matches nanoswe training path)"
+        assert T > 1, "Standalone forward expects T > 1 (matches nanochat training path)"
         device = idx.device
 
         # Move RoPE to the right device on first use.
@@ -702,6 +779,20 @@ class NanoChatForCausalLM(nn.Module):
             self.smear_gate(x[..., : self.config.smear_gate_channels])
         )  # (N, 1)
 
+        # DIAGNOSTIC (env-gated, default OFF): bypass the block_table[:,0]-keyed
+        # cross-forward smear cache (which collides across prefix-sharing requests
+        # and uses a nondeterministic duplicate-index index_copy_). Falls back to
+        # the positions-driven in-batch-only smear (no cross-request state). Used to
+        # test whether the smear cache is the source of per-process coupling/variance.
+        import os as _os
+        if _os.environ.get("NANOCHAT_NO_SMEAR_CACHE"):
+            if N <= 1:
+                return x
+            prev = F.pad(x[:-1], (0, 0, 1, 0))
+            same_req = (positions[1:] == positions[:-1] + 1) & (positions[1:] > 0)
+            mask = F.pad(same_req.to(x.dtype).unsqueeze(-1), (0, 0, 1, 0))
+            return x + gate * (prev * mask)
+
         meta = self._get_attn_metadata()
         block_table = self._get_block_table(meta) if meta is not None else None
         qsl = self._get_query_start_loc(meta) if meta is not None else None
@@ -745,6 +836,12 @@ class NanoChatForCausalLM(nn.Module):
         pos_at_start = positions.index_select(0, starts).to(torch.long)
         is_cont = (pos_at_start > 0).to(x.dtype).unsqueeze(-1)         # (R, 1)
         cached = cached.to(dtype=x.dtype) * is_cont
+        if _SMEAR_GUARD:
+            # Env-gated (default off, branch dead-code-eliminated by dynamo):
+            # zero cached rows whose stored writer position doesn't match this
+            # reader's expected position.  Compiler-disabled eager op, same
+            # pattern as `_save_smear_state`.
+            cached = self._guard_smear_reads(cached, bids, pos_at_start)
         # Inject cache at request starts (overwrites the wrong shifted value).
         prev.index_copy_(0, starts, cached)
 
@@ -758,12 +855,84 @@ class NanoChatForCausalLM(nn.Module):
         # (its codegen inserts a `buf.copy_` that's illegal during cudagraph
         # capture) — it stays as an eager op inside the captured graph.
         last_pre_smear = x.index_select(0, ends)
-        self._save_smear_state(bids, last_pre_smear)
+        if _SMEAR_GUARD:
+            self._save_smear_state_guarded(
+                bids, last_pre_smear, positions.index_select(0, ends)
+            )
+        else:
+            self._save_smear_state(bids, last_pre_smear)
         return x_smeared
 
     @torch.compiler.disable
     def _save_smear_state(self, bids: torch.Tensor, last_pre_smear: torch.Tensor) -> None:
+        if _SMEAR_STATS:
+            self._smear_stats_update(bids)
         self._smear_prev_cache.index_copy_(0, bids, last_pre_smear)
+
+    @torch.compiler.disable
+    def _save_smear_state_guarded(
+        self, bids: torch.Tensor, last_pre_smear: torch.Tensor, pos_at_end: torch.Tensor
+    ) -> None:
+        """NANOCHAT_SMEAR_GUARD write side: value save + position tag.
+
+        Same duplicate-key `index_copy_` semantics as the value write.  NOTE:
+        winner selection for duplicate indices is per-call, so when duplicate
+        keys occur within ONE forward the pos winner can in principle differ
+        from the value winner — the guard then can't distinguish that row (it
+        fully catches the cross-forward stale-entry case)."""
+        self._save_smear_state(bids, last_pre_smear)
+        self._smear_prev_pos.index_copy_(0, bids, pos_at_end.to(torch.int32))
+
+    @torch.compiler.disable
+    def _guard_smear_reads(
+        self, cached: torch.Tensor, bids: torch.Tensor, pos_at_start: torch.Tensor
+    ) -> torch.Tensor:
+        """NANOCHAT_SMEAR_GUARD read side: position-validated cache reads.
+
+        Zero rows whose stored writer position != positions[start]-1 — treat
+        them as cache misses instead of injecting another request's embedding.
+        Fresh prefills are unaffected (already zeroed by the `is_cont` mask);
+        valid same-request handoffs match exactly (writer saved its last token
+        at position p, the reader resumes at position p+1)."""
+        stored = self._smear_prev_pos.index_select(0, bids).to(torch.long)  # (R,)
+        expected = pos_at_start - 1                                         # (R,)
+        ok = (stored == expected).unsqueeze(-1)                             # (R, 1)
+        return cached * ok.to(cached.dtype)
+
+    def _smear_stats_update(self, bids: torch.Tensor) -> None:
+        """NANOCHAT_SMEAR_STATS: accumulate duplicate-key stats sync-free.
+
+        Called only from inside compiler-disabled save ops.  Skipped during
+        cudagraph capture (no python side effects / syncs allowed there); a
+        replayed decode graph skips python entirely, so run with
+        enforce_eager for full stats coverage.  Duplicate detection uses
+        sort + adjacent-compare + searchsorted instead of `.unique()` —
+        equivalent result, but no device→host sync outside the every-512
+        print."""
+        if bids.is_cuda and torch.cuda.is_current_stream_capturing():
+            return
+        self._ss_forwards += 1
+        if self._ss_collisions_t is None:
+            self._ss_collisions_t = torch.zeros((), dtype=torch.int64, device=bids.device)
+            self._ss_maxdup_t = torch.ones((), dtype=torch.int64, device=bids.device)
+        if bids.numel() > 1:
+            sorted_bids, _ = torch.sort(bids)
+            dup = sorted_bids[1:] == sorted_bids[:-1]                       # (R-1,)
+            # collision forward := any duplicate key in this save
+            self._ss_collisions_t += dup.any().to(torch.int64)
+            # max duplicate multiplicity via searchsorted (sync-free)
+            lo = torch.searchsorted(sorted_bids, sorted_bids, right=False)
+            hi = torch.searchsorted(sorted_bids, sorted_bids, right=True)
+            self._ss_maxdup_t = torch.maximum(self._ss_maxdup_t, (hi - lo).max())
+        if self._ss_forwards % 512 == 0:
+            m = int(self._ss_collisions_t.item())   # the only syncs: 1/512 fwds
+            k = int(self._ss_maxdup_t.item())
+            n = self._ss_forwards
+            print(
+                f"[smear-stats] forwards={n} collisions={m} "
+                f"({100.0 * m / n:.1f}%) max_dup={k}",
+                flush=True,
+            )
 
     @staticmethod
     def _get_query_start_loc(meta) -> Optional[torch.Tensor]:
@@ -852,8 +1021,8 @@ class NanoChatForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Direct name-for-name load.
 
-        Names from a converted nanoswe checkpoint already match our parameter
-        names (we deliberately mirrored the nanoswe module structure).  Any
+        Names from a converted nanochat checkpoint already match our parameter
+        names (we deliberately mirrored the nanochat module structure).  Any
         `_orig_mod.` prefix is stripped here defensively in case the converter
         was bypassed.
         """

@@ -24,6 +24,7 @@ class NanoChatConfig(PretrainedConfig):
         rope_theta: float = 100000.0,
         tie_word_embeddings: bool = False,
         window_pattern: str = "L",
+        sequence_len: int | None = None,
         smear_gate_channels: int = 24,
         ve_gate_channels: int = 12,
         qk_norm_scale: float = 1.2,
@@ -53,6 +54,9 @@ class NanoChatConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.rope_theta = rope_theta
         self.window_pattern = window_pattern
+        # Training sequence length the sliding windows derive from (nanochat.gpt._compute_window_sizes:
+        # L = sequence_len, S = ceil(sequence_len/4/128)*128). Older exports lack it -> max_position_embeddings.
+        self.sequence_len = sequence_len
         self.smear_gate_channels = smear_gate_channels
         self.ve_gate_channels = ve_gate_channels
         self.qk_norm_scale = qk_norm_scale
