@@ -38,12 +38,11 @@
 # Prereqs (see README.md): the uv-synced env, a tokenizer at
 # $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl, and the corpus — set
 # NANOSWE_TRAJS_DIR to a local copy of the Hub dataset above (train shards at
-# its root, the held-out val/ next to them), or it is snapshot-downloaded
-# (NANOSWE_TRAJS_REPO). val/ is only scored at step 0 and at the end (outside
-# the training clock). The original run also scored an internal test set of
-# teacher trajectories on SWE-bench Verified instances (the
-# bpb_base_data_smith_v3_test_trainfmt lines in speedrun.log); it is not
-# released and never trained on, and scoring it does not touch training.
+# its root, val/ and test/ next to them), or it is snapshot-downloaded
+# (NANOSWE_TRAJS_REPO). val/ (held-out SWE-smith instances) and test/ (the
+# teacher's rollouts on SWE-bench Verified instances: an evaluation set, NEVER
+# trained on) are only scored, at step 0 and at the end, outside the training
+# clock -- the bpb / bpb_<dir> lines of speedrun.log.
 # =============================================================================
 set -euo pipefail
 
@@ -69,11 +68,11 @@ fi
 export NANOSWE_TRAJS_DIR
 n_train=$(ls "$NANOSWE_TRAJS_DIR"/train-*.parquet 2>/dev/null | wc -l)
 [ "$n_train" -eq 168 ] || { echo "ERROR: expected 168 train shards at the root of $NANOSWE_TRAJS_DIR, found $n_train"; exit 1; }
-ls "$NANOSWE_TRAJS_DIR"/val/*.parquet >/dev/null || { echo "ERROR: $NANOSWE_TRAJS_DIR needs val/"; exit 1; }
+ls "$NANOSWE_TRAJS_DIR"/val/*.parquet "$NANOSWE_TRAJS_DIR"/test/*.parquet >/dev/null || { echo "ERROR: $NANOSWE_TRAJS_DIR needs val/ and test/"; exit 1; }
 
 # ---- recipe: one phase ------------------------------------------------------
 # 13,024 it x TBS 1,835,008 tok => 23,899,144,192 tokens. "dir" = the train
-# shards (every shard, split "all"; the held-out val/ lives in a subdir).
+# shards (every shard, split "all"; the held-out val/ and test/ live in subdirs).
 PHASES="$(python - "$NANOSWE_TRAJS_DIR" <<'PY'
 import json, sys
 print(json.dumps([
@@ -99,8 +98,8 @@ torchrun --standalone --nproc_per_node="$NPROC" -m scripts.base_train -- \
     --max-gpu-hours="$MAX_GPU_HOURS" \
     --phases="$PHASES" \
     --eval-every=13024 \
-    --val-chat-dir="$NANOSWE_TRAJS_DIR/val" \
-    --eval-chat-tokens=40108032 \
+    --val-chat-dir="$NANOSWE_TRAJS_DIR/val,$NANOSWE_TRAJS_DIR/test" \
+    --eval-chat-tokens=40108032,29884416 \
     --val-sequential-pack \
     --no-save-optimizer \
     ${CHECKPOINT_STAGE_DIR:+--checkpoint-stage-dir="$CHECKPOINT_STAGE_DIR"} \
