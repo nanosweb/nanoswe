@@ -50,8 +50,8 @@
 # horizon ended it inside the budget, and the cap does not change numerics.)
 #
 # Prereqs (see README.md): the uv-synced env, a tokenizer at
-# $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl, the FineWeb-Edu shards (the first
-# 93 train shards are read; the first FINEWEB_SHARDS are downloaded into
+# $NANOSWE_BASE_DIR/tokenizer/tokenizer.pkl, the FineWeb-Edu shards (shards
+# 0-93 are read, the last partly; the first FINEWEB_SHARDS are downloaded into
 # $NANOSWE_BASE_DIR/base_data_fineweb if missing) and the trajectory corpus
 # (NANOSWE_TRAJS_DIR = a local copy of the Hub dataset above, train shards at
 # its root and the held-out val/ next to them; else snapshot-downloaded). val/
@@ -75,7 +75,7 @@ export NANOSWE_TRAJS_REPO="${NANOSWE_TRAJS_REPO:-nanoswe/nanoswe-trajs-261002}"
 NPROC="${NPROC:-8}"
 MAX_GPU_HOURS="${MAX_GPU_HOURS:-192}"                  # competition budget (web + SFT)
 SFT_RESERVE_GPU_HOURS=0.30                             # non-step wall-clock reserve (see BUDGET above)
-FINEWEB_SHARDS="${FINEWEB_SHARDS:-100}"                # >= 93 train shards are read by the web launch
+FINEWEB_SHARDS="${FINEWEB_SHARDS:-100}"                # the web launch reads shards 0-93
 TAG="${MODEL_TAG:-nanoswe-192h-261006}"
 WEB_TAG="${WEB_TAG:-$TAG-web}"
 
